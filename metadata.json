@@ -1,0 +1,6 @@
+{
+  "name": "Trade Killer",
+  "description": "Algorithmic trading terminal, risk guard, and local PC server control interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
