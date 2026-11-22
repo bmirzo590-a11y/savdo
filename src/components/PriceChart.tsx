@@ -61,24 +61,31 @@ export const PriceChart: React.FC<PriceChartProps> = ({
   useEffect(() => {
     let cancelled = false;
     async function loadMt5Candles() {
-      try {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 1400);
-        const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
-        const res = await fetch(
-          `${base}/api/candles?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${timeframe}&count=180`,
-          { signal: controller.signal }
-        );
-        window.clearTimeout(timeout);
-        if (!res.ok) throw new Error('MT5 offline');
-        const data = await res.json();
-        if (!cancelled && Array.isArray(data.candles) && data.candles.length > 20) {
-          setMt5LiveCandles(data.candles);
-          setCandleSource('MT5 Real Shamlar');
-          return;
+      const primaryBase = serverConfig.apiBaseUrl.replace(/\/$/, '');
+      const candidates =
+        primaryBase === 'http://127.0.0.1:8000'
+          ? [primaryBase, 'http://localhost:8000']
+          : [primaryBase];
+
+      for (const base of candidates) {
+        try {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 1600);
+          const res = await fetch(
+            `${base}/api/candles?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${timeframe}&count=180`,
+            { signal: controller.signal }
+          );
+          window.clearTimeout(timeout);
+          if (!res.ok) continue;
+          const data = await res.json();
+          if (!cancelled && Array.isArray(data.candles) && data.candles.length > 20) {
+            setMt5LiveCandles(data.candles);
+            setCandleSource('MT5 Real Shamlar');
+            return;
+          }
+        } catch {
+          // Try next candidate
         }
-      } catch {
-        // Bridge not running in cloud preview; keep clean simulated MT5 bars
       }
       if (!cancelled) {
         setMt5LiveCandles(null);

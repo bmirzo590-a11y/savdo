@@ -78,6 +78,19 @@ LOCAL_LLM_API_KEY="SIZNING_PROKSI_KALITINGIZ"
     downloadTextFile('.env', buildEnvTemplate(), 'text/plain;charset=utf-8');
   };
 
+  const handleDownloadBat = () => {
+    const bat = `@echo off
+title Trade Killer AI - MT5 Bridge
+cd /d "%~dp0"
+echo [1/2] Python kutubxonalari tekshirilmoqda...
+pip install -q MetaTrader5 fastapi uvicorn httpx pydantic
+echo [2/2] MT5 Bridge ishga tushirilmoqda (http://127.0.0.1:8000)...
+python mt5_bridge.py
+pause
+`;
+    downloadTextFile('start_mt5_bridge.bat', bat, 'application/x-bat;charset=utf-8');
+  };
+
   const handleCopy = async (target: 'html' | 'py' | 'env') => {
     const content =
       target === 'html'
@@ -151,12 +164,20 @@ LOCAL_LLM_API_KEY="SIZNING_PROKSI_KALITINGIZ"
         <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-200 dark:border-slate-800">
           <div className="max-w-3xl">
             <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-              VS Code + MetaTrader 5 + Test AI Proksi (Oson ishga tushirish)
+              MetaTrader 5 ni Haqiqiy Ulash (VS Code / Windows PC)
             </h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              Kompyuteringizdagi bitta papkaga <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0D1320] text-[#C8285E] dark:text-[#FF7AA5]">mt5_bridge.py</code>, <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0D1320] text-emerald-600 dark:text-emerald-400">index.html</code> va <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0D1320] text-amber-600 dark:text-amber-300">.env</code> faylini yuklab oling. Bridge avtomatik <code className="font-mono text-xs">http://localhost:3001/v1</code> (model: <code className="font-mono text-xs">auto</code>) va ochiq MT5 terminaliga ulanadi.
+              Brauzerdagi ushbu bulut (<code className="font-mono text-xs">https://</code>) sahifasi xavfsizlik sababli kompyuteringizdagi MetaTrader 5 ga to‘g‘ridan-to‘g‘ri kira olmaydi. Haqiqiy shamlar, balans va savdo uchun bitta papkaga quyidagi fayllarni yuklab oling: <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0D1320] text-[#C8285E] dark:text-[#FF7AA5]">mt5_bridge.py</code>, <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0D1320] text-emerald-600 dark:text-emerald-400">index.html</code> (va xohlasangiz AI uchun <code className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-100 dark:bg-[#0D1320] text-amber-600 dark:text-amber-300">.env</code>). Keyin <code className="font-mono text-xs">http://127.0.0.1:8000</code> manzilini oching.
             </p>
           </div>
+          <button
+            type="button"
+            onClick={handleDownloadBat}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-[#F25F8C]/45 bg-[#F25F8C]/12 text-[#C8285E] dark:text-[#FF7AA5] hover:bg-[#F25F8C]/20 cursor-pointer whitespace-nowrap"
+          >
+            <Download className="w-3.5 h-3.5" />
+            <span>start_mt5_bridge.bat (1-bosish)</span>
+          </button>
         </div>
 
         <div className="mt-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -269,12 +290,13 @@ LOCAL_LLM_API_KEY="SIZNING_PROKSI_KALITINGIZ"
         <div className="mt-5 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-[#0D1320] text-slate-200 font-mono text-xs space-y-1.5">
           <div className="flex items-center gap-2 text-[#FF7AA5] mb-2">
             <Terminal className="w-4 h-4" />
-            <span>VS Code terminalida ishga tushirish (2 ta buyruq):</span>
+            <span>Ishga tushirish (VS Code yoki start_mt5_bridge.bat):</span>
           </div>
-          <div>1. pip install MetaTrader5 fastapi uvicorn httpx pydantic</div>
-          <div>2. python mt5_bridge.py</div>
+          <div>1. MetaTrader 5 dasturini kompyuterda oching va hisobingizga kiring (Algo Trading tugmasini yashil qiling).</div>
+          <div>2. Shu papkada: pip install MetaTrader5 fastapi uvicorn httpx pydantic</div>
+          <div>3. python mt5_bridge.py (yoki start_mt5_bridge.bat ni 2 marta bosing)</div>
           <div className="text-emerald-400 pt-1">
-            Tayyor: brauzerda http://127.0.0.1:8000 ni oching (kompyuterda MT5 va http://localhost:3001/v1 proksi ochiq bo‘lsin).
+            Tayyor: brauzer avtomatik ravishda http://127.0.0.1:8000 ni ochadi — o‘sha yerda MT5 ning haqiqiy shamlari va real balansingiz ishlaydi.
           </div>
         </div>
       </section>
@@ -362,7 +384,21 @@ LOCAL_LLM_API_KEY="SIZNING_PROKSI_KALITINGIZ"
             </div>
           )}
 
-          <div className="flex items-center justify-end">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <label className="inline-flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={draft.autoSyncMt5}
+                onChange={(e) => {
+                  const updated = { ...draft, autoSyncMt5: e.target.checked };
+                  setDraft(updated);
+                  onUpdateConfig(updated);
+                }}
+                className="rounded border-slate-600 accent-[#F25F8C]"
+              />
+              <span>MT5 bilan har 2 soniyada avtomatik sinxronlash</span>
+            </label>
+
             <button
               type="submit"
               className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-[#F25F8C] via-[#EB6B7B] to-[#E87769] text-slate-950 hover:brightness-110 neon-glow-cyan cursor-pointer"

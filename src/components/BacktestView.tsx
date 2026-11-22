@@ -64,23 +64,32 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
     let dataSource: 'MT5 Real Tarix' | 'Simulyatsiya (MT5 ulanmagan)' =
       'Simulyatsiya (MT5 ulanmagan)';
 
-    try {
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 1600);
-      const url = `${serverConfig.apiBaseUrl.replace(/\/$/, '')}/api/candles?symbol=${encodeURIComponent(
-        activeParams.symbol
-      )}&timeframe=${activeParams.timeframe}&count=${activeParams.barsCount}`;
-      const res = await fetch(url, { signal: controller.signal });
-      window.clearTimeout(timeout);
-      if (res.ok) {
-        const json = await res.json();
-        if (Array.isArray(json.candles) && json.candles.length > 20) {
-          candles = json.candles;
-          dataSource = 'MT5 Real Tarix';
+    const primaryBase = serverConfig.apiBaseUrl.replace(/\/$/, '');
+    const candidates =
+      primaryBase === 'http://127.0.0.1:8000'
+        ? [primaryBase, 'http://localhost:8000']
+        : [primaryBase];
+
+    for (const base of candidates) {
+      try {
+        const controller = new AbortController();
+        const timeout = window.setTimeout(() => controller.abort(), 1800);
+        const url = `${base}/api/candles?symbol=${encodeURIComponent(
+          activeParams.symbol
+        )}&timeframe=${activeParams.timeframe}&count=${activeParams.barsCount}`;
+        const res = await fetch(url, { signal: controller.signal });
+        window.clearTimeout(timeout);
+        if (res.ok) {
+          const json = await res.json();
+          if (Array.isArray(json.candles) && json.candles.length > 20) {
+            candles = json.candles;
+            dataSource = 'MT5 Real Tarix';
+            break;
+          }
         }
+      } catch {
+        // Try next candidate or fallback
       }
-    } catch {
-      // Fallback to deterministic historical candles when PC MT5 bridge is offline
     }
 
     if (candles.length === 0) {

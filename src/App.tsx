@@ -83,6 +83,12 @@ export default function App() {
     realizedToday: number;
   } | null>(null);
   const [mt5Connected, setMt5Connected] = useState<boolean>(false);
+  const [mt5SyncStatus, setMt5SyncStatus] = useState<
+    'connecting' | 'connected' | 'https_blocked' | 'offline' | 'mt5_error'
+  >('connecting');
+  const [mt5ErrorDetail, setMt5ErrorDetail] = useState<string>('');
+  const [showConnectionNotice, setShowConnectionNotice] = useState<boolean>(true);
+  const [syncTrigger, setSyncTrigger] = useState<number>(0);
   const [liveTicks, setLiveTicks] = useState<boolean>(true);
   const [fullAiPermissions, setFullAiPermissions] = useState<boolean>(true);
   const [killModalOpen, setKillModalOpen] = useState<boolean>(false);
@@ -140,24 +146,26 @@ export default function App() {
       }
     }
     if (Array.isArray(data.pairs) && data.pairs.length > 0) {
-      setPairs((prevPairs) =>
-        data.pairs!.map((incoming) => {
-          const fallback = prevPairs.find((p) => p.symbol === incoming.symbol);
-          return {
-            ...(fallback ?? {
-              base: incoming.symbol.slice(0, 3),
-              quote: incoming.symbol.slice(3) || 'USD',
-              change24h: 0,
-              high24h: incoming.price,
-              low24h: incoming.price,
-              volume24h: 0,
-              rsi14: 50,
-              trend: 'Yonlama' as const,
-            }),
-            ...incoming,
-          };
-        })
-      );
+      const normalizedPairs: MarketPair[] = data.pairs.map((incoming) => ({
+        ...incoming,
+        base: incoming.base || incoming.symbol.slice(0, 3),
+        quote: incoming.quote || incoming.symbol.slice(3) || 'USD',
+        change24h: incoming.change24h ?? 0,
+        high24h: incoming.high24h ?? incoming.price,
+        low24h: incoming.low24h ?? incoming.price,
+        volume24h: incoming.volume24h ?? 0,
+        rsi14: incoming.rsi14 ?? 50,
+        trend: incoming.trend ?? ('Yonlama' as const),
+        contractSize: incoming.contractSize ?? 100,
+      }));
+      setPairs(normalizedPairs);
+      setSelectedSymbol((curr) => {
+        if (normalizedPairs.some((p) => p.symbol === curr)) return curr;
+        const prefixMatch = normalizedPairs.find((p) =>
+          p.symbol.toUpperCase().startsWith(curr.toUpperCase())
+        );
+        return prefixMatch ? prefixMatch.symbol : normalizedPairs[0].symbol;
+      });
     }
     if (Array.isArray(data.positions)) {
       setPositions(data.positions);
@@ -168,29 +176,58 @@ export default function App() {
   useEffect(() => {
     if (!serverConfig.autoSyncMt5) {
       setMt5Connected(false);
+      setMt5SyncStatus('offline');
       return;
     }
     let cancelled = false;
     const syncOnce = async () => {
-      try {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 1400);
-        const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
-        const res = await fetch(`${base}/api/status`, { signal: controller.signal });
-        window.clearTimeout(timeout);
-        if (!res.ok) throw new Error('MT5 offline');
-        const json = await res.json();
-        if (!cancelled && json && json.account) {
-          setMt5Connected(true);
-          applyServerSnapshot(json);
-          return;
+      const primaryBase = serverConfig.apiBaseUrl.replace(/\/$/, '');
+      const candidates =
+        primaryBase === 'http://127.0.0.1:8000'
+          ? [primaryBase, 'http://localhost:8000']
+          : [primaryBase];
+
+      let lastReason: 'https_blocked' | 'offline' | 'mt5_error' = 'offline';
+      let lastDetail = '';
+
+      for (const base of candidates) {
+        try {
+          const controller = new AbortController();
+          const timeout = window.setTimeout(() => controller.abort(), 1600);
+          const res = await fetch(`${base}/api/status`, { signal: controller.signal });
+          window.clearTimeout(timeout);
+          if (!res.ok) {
+            let errText = `HTTP ${res.status}`;
+            try {
+              const errJson = await res.json();
+              if (errJson?.detail) errText = String(errJson.detail);
+            } catch {
+              // ignore non-JSON body
+            }
+            lastReason = 'mt5_error';
+            lastDetail = errText;
+            continue;
+          }
+          const json = await res.json();
+          if (!cancelled && json && json.account) {
+            setMt5Connected(true);
+            setMt5SyncStatus('connected');
+            setMt5ErrorDetail('');
+            applyServerSnapshot(json);
+            return;
+          }
+        } catch {
+          if (typeof window !== 'undefined' && window.location.protocol === 'https:' && base.startsWith('http://')) {
+            lastReason = 'https_blocked';
+          }
         }
-      } catch {
-        // MT5 Bridge not running on localhost; keep local simulation fallback
       }
+
       if (!cancelled) {
         setMt5Connected(false);
         setMt5Account(null);
+        setMt5SyncStatus(lastReason);
+        setMt5ErrorDetail(lastDetail);
       }
     };
     syncOnce();
@@ -199,7 +236,7 @@ export default function App() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [serverConfig.apiBaseUrl, serverConfig.autoSyncMt5, serverConfig.pollingIntervalMs]);
+  }, [serverConfig.apiBaseUrl, serverConfig.autoSyncMt5, serverConfig.pollingIntervalMs, syncTrigger]);
 
   useEffect(() => {
     if (!liveTicks || mt5Connected) return;
@@ -772,7 +809,13 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => setLiveTicks((prev) => !prev)}
+                    onClick={() => {
+                      if (!mt5Connected) {
+                        setShowConnectionNotice(true);
+                        setSyncTrigger((n) => n + 1);
+                      }
+                      setLiveTicks((prev) => !prev);
+                    }}
                     className={`px-3.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap cursor-pointer ${
                       mt5Connected
                         ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-600 dark:text-emerald-300'
@@ -789,6 +832,51 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {!mt5Connected && showConnectionNotice && (
+                <div className="rounded-xl border border-[#F25F8C]/40 bg-white dark:bg-[#131B2B] p-4 flex flex-wrap items-center justify-between gap-4">
+                  <div className="space-y-1 max-w-3xl">
+                    <div className="text-xs font-semibold text-[#C8285E] dark:text-[#FF7AA5]">
+                      {mt5SyncStatus === 'https_blocked'
+                        ? 'Bulut (HTTPS) brauzeridan kompyuteringizdagi MT5 ga to‘g‘ridan-to‘g‘ri ulanish bloklangan'
+                        : mt5SyncStatus === 'mt5_error'
+                          ? 'MT5 Bridge ishlayapti, lekin MetaTrader 5 terminali ulanmadi'
+                          : 'Lokal MT5 Bridge (127.0.0.1:8000) topilmadi — hozir demo simulyatsiya ko‘rsatilmoqda'}
+                    </div>
+                    <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                      {mt5SyncStatus === 'https_blocked'
+                        ? 'Brauzer xavfsizlik qoidasi sababli HTTPS sayt ichidan kompyuterdagi http://127.0.0.1:8000 ga murojaatni bloklaydi. Real MT5 shamlari va haqiqiy balansingizni ko‘rish uchun "VS Code · MT5" bo‘limidan fayllarni yuklab olib, kompyuterda "python mt5_bridge.py" ni yoqing va brauzerda to‘g‘ridan-to‘g‘ri http://127.0.0.1:8000 manzilini oching.'
+                        : mt5SyncStatus === 'mt5_error'
+                          ? mt5ErrorDetail
+                          : 'MetaTrader 5 kompyuteringizda ochiq bo‘lsa ham, veb-interfeys bilan bog‘lash uchun "VS Code · MT5" bo‘limidan mt5_bridge.py va index.html ni yuklab olib "python mt5_bridge.py" ni ishga tushiring.'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setSyncTrigger((n) => n + 1)}
+                      className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:border-[#F25F8C]/50 cursor-pointer whitespace-nowrap"
+                    >
+                      Qayta tekshirish
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setActiveView('server')}
+                      className="px-3.5 py-1.5 text-xs font-semibold rounded-lg bg-gradient-to-r from-[#F25F8C] via-[#EB6B7B] to-[#E87769] text-slate-950 hover:brightness-110 cursor-pointer whitespace-nowrap"
+                    >
+                      MT5 ga ulash yo‘riqnomasi
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowConnectionNotice(false)}
+                      aria-label="Xabarni yopish"
+                      className="p-1.5 text-slate-400 hover:text-slate-200 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
                 <div className="rounded-xl border border-slate-200 dark:border-slate-800/90 bg-white dark:bg-[#131B2B] neon-surface p-5">

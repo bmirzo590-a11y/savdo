@@ -248,7 +248,7 @@ export const INITIAL_SERVER_CONFIG: ServerConfig = {
   mt5Server: 'MetaQuotes-Demo',
   llmProxyUrl: 'http://localhost:3001/v1',
   pollingIntervalMs: 2000,
-  autoSyncMt5: false,
+  autoSyncMt5: true,
 };
 
 export function generateCandlesForPair(basePrice: number, points = 36): CandlePoint[] {

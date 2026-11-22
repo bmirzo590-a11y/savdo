@@ -93,6 +93,11 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
 
   <script>
     const INITIAL_STATE = ${safeJson};
+    const API_BASE = (location.protocol.startsWith('http') && (location.hostname === '127.0.0.1' || location.hostname === 'localhost') && location.port === '8000')
+      ? ''
+      : ((INITIAL_STATE.serverConfig && INITIAL_STATE.serverConfig.apiBaseUrl) || 'http://127.0.0.1:8000').replace(/\\/$/, '');
+    function apiUrl(p) { return API_BASE + p; }
+
     const state = {
       view: 'terminal',
       selectedSymbol: INITIAL_STATE.pairs[0].symbol,
@@ -114,6 +119,11 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       mt5Status: 'Lokal MT5 tekshirilmoqda...',
       aiProxyStatus: 'Tekshirilmagan',
       orderMsg: '',
+      orderSide: 'BUY',
+      orderLot: '0.10',
+      orderSl: '',
+      orderTp: '',
+      riskPct: '1',
       backtestResult: null,
       btStrategy: 'all_6_confluence',
       aiSummary: null,
@@ -194,7 +204,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
 
     async function fetchMt5Candles() {
       try {
-        const res = await fetch('/api/candles?symbol=' + encodeURIComponent(state.selectedSymbol) + '&timeframe=' + state.timeframe + '&count=180');
+        const res = await fetch(apiUrl('/api/candles?symbol=' + encodeURIComponent(state.selectedSymbol) + '&timeframe=' + state.timeframe + '&count=180'));
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         if (Array.isArray(data.candles) && data.candles.length) {
@@ -202,7 +212,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
           state.candleSource = 'MT5 Real Shamlar';
           state.brain = computeBrainLocal(data.candles);
           try {
-            const br = await fetch('/api/brain?symbol=' + encodeURIComponent(state.selectedSymbol) + '&timeframe=' + state.timeframe);
+            const br = await fetch(apiUrl('/api/brain?symbol=' + encodeURIComponent(state.selectedSymbol) + '&timeframe=' + state.timeframe));
             if (br.ok) {
               const bjson = await br.json();
               if (bjson && bjson.emaRibbon) state.brain = { ...state.brain, serverBrain: bjson };
@@ -218,8 +228,12 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       if (state.syncBusy) return;
       state.syncBusy = true;
       try {
-        const res = await fetch('/api/status');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const res = await fetch(apiUrl('/api/status'));
+        if (!res.ok) {
+          let errMsg = 'HTTP ' + res.status;
+          try { const ej = await res.json(); if (ej && ej.detail) errMsg = ej.detail; } catch (_) {}
+          throw new Error(errMsg);
+        }
         const data = await res.json();
         if (data.account) {
           state.balance = Number(data.account.balance || 0);
@@ -231,17 +245,24 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
           const sideLogin = document.getElementById('tk-side-login');
           if (sideLogin && state.login) sideLogin.textContent = '#' + state.login;
         }
-        if (Array.isArray(data.pairs) && data.pairs.length) state.pairs = data.pairs;
+        if (Array.isArray(data.pairs) && data.pairs.length) {
+          state.pairs = data.pairs;
+          if (!state.pairs.some(p => p.symbol === state.selectedSymbol)) {
+            const match = state.pairs.find(p => p.symbol.toUpperCase().startsWith(state.selectedSymbol.toUpperCase()));
+            state.selectedSymbol = match ? match.symbol : state.pairs[0].symbol;
+          }
+        }
         if (Array.isArray(data.positions)) state.positions = data.positions;
         state.mt5Status = state.login ? ('MT5 Ulangan (#' + state.login + ')') : 'MT5 Ulangan';
-      } catch (_) {
-        state.mt5Status = 'Offline (python mt5_bridge.py ni yoqing)';
+      } catch (err) {
+        state.mt5Status = err && err.message && err.message.indexOf('Failed to fetch') === -1
+          ? err.message
+          : 'Offline (python mt5_bridge.py ni yoqing)';
       }
       await fetchMt5Candles();
       state.syncBusy = false;
-      // Avoid clearing active chat/order inputs during background polling
       const activeEl = document.activeElement;
-      if (activeEl && (activeEl.id === 'tk-ai-input' || activeEl.id === 'tk-lot' || activeEl.id === 'tk-sl' || activeEl.id === 'tk-tp')) {
+      if (activeEl && (activeEl.id === 'tk-ai-input' || activeEl.id === 'tk-lot' || activeEl.id === 'tk-sl' || activeEl.id === 'tk-tp' || activeEl.id === 'tk-risk-pct')) {
         return;
       }
       render();
@@ -252,7 +273,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       banner.classList.remove('hidden');
       banner.innerHTML = '<span class="text-[#FF7AA5] font-mono">MT5 va localhost:3001/v1 AI Proksi tekshirilmoqda...</span>';
       try {
-        const res = await fetch('/api/ai/test');
+        const res = await fetch(apiUrl('/api/ai/test'));
         const t = await res.json();
         state.mt5Status = t.mt5Ok ? 'MT5 Ulangan' : t.mt5Detail;
         state.aiProxyStatus = t.aiOk ? 'AI Proksi Tayyor' : t.aiDetail;
@@ -391,6 +412,31 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       \`;
     }
 
+    function computeOrderRisk(pair) {
+      const dec = pair.price >= 100 ? 2 : 4;
+      const defaultSl = state.orderSide === 'BUY' ? (pair.price * 0.992).toFixed(dec) : (pair.price * 1.008).toFixed(dec);
+      const defaultTp = state.orderSide === 'BUY' ? (pair.price * 1.018).toFixed(dec) : (pair.price * 0.982).toFixed(dec);
+      const slNum = parseFloat(state.orderSl || defaultSl);
+      const tpNum = parseFloat(state.orderTp || defaultTp);
+      const lotNum = Math.max(0.01, parseFloat(state.orderLot) || 0.1);
+      const rPct = Math.min(25, Math.max(0, parseFloat(state.riskPct) || 0));
+      const eq = Math.max(0, state.equity || state.balance || 0);
+      const riskBudget = eq * (rPct / 100);
+      const cSize = pair.contractSize || 100;
+      const isUsdBase = (pair.base === 'USD' || pair.symbol.startsWith('USD')) && pair.quote !== 'USD';
+      const slValid = !isNaN(slNum) && slNum > 0 && (state.orderSide === 'BUY' ? slNum < pair.price : slNum > pair.price);
+      const slDist = slValid ? Math.abs(pair.price - slNum) : 0;
+      const lossPerLot = slValid && slDist > 0 ? (isUsdBase ? (slDist * cSize) / Math.max(1e-9, pair.price) : slDist * cSize) : 0;
+      const suggestedLot = lossPerLot > 0 && riskBudget > 0 ? Math.max(0.01, Math.min(100, Math.floor((riskBudget / lossPerLot) * 100) / 100)) : null;
+      const curRiskUsd = lossPerLot > 0 ? lotNum * lossPerLot : null;
+      const tpValid = !isNaN(tpNum) && tpNum > 0 && (state.orderSide === 'BUY' ? tpNum > pair.price : tpNum < pair.price);
+      const tpDist = tpValid ? Math.abs(tpNum - pair.price) : 0;
+      const gainPerLot = tpValid && tpDist > 0 ? (isUsdBase ? (tpDist * cSize) / Math.max(1e-9, pair.price) : tpDist * cSize) : 0;
+      const curRewardUsd = gainPerLot > 0 ? lotNum * gainPerLot : null;
+      const rr = curRiskUsd && curRewardUsd ? (curRewardUsd / curRiskUsd).toFixed(2) : null;
+      return { defaultSl, defaultTp, riskBudget, slValid, suggestedLot, curRiskUsd, curRewardUsd, rr };
+    }
+
     function renderTerminal() {
       const openPos = state.positions.filter(p => p.status === 'OPEN');
       const openPnl = state.login ? state.openProfit : openPos.reduce((s, p) => s + calcPnl(p), 0);
@@ -399,13 +445,14 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       const brainStrip = state.brain
         ? 'EMA: ' + (sb ? sb.emaRibbon.alignment : state.brain.alignment) + ' · RSI: ' + Number(sb ? sb.rsi14 : state.brain.rsi14).toFixed(1) + ' · SMC: ' + (sb ? sb.smc.lastStructure + ' (' + sb.smc.zone + ')' : state.brain.smcZone) + ' · PAC34: ' + (sb ? sb.scalpingPullback.signal : 'Faol')
         : '6-strategiya hisoblanmoqda...';
+      const rk = computeOrderRisk(pair);
 
       return \`
         <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
           <div class="rounded-xl border neon-surface p-5"><div class="text-xs text-slate-400">MT5 Balans / Kapital (Equity)</div><div class="mt-2 text-2xl font-semibold font-mono tabular-nums">\${fmtMoney(state.balance)} / \${fmtMoney(state.equity)}</div><div class="mt-1 text-xs font-mono text-slate-400">Erkin marja: \${fmtMoney(state.marginFree)}</div></div>
           <div class="rounded-xl border neon-surface p-5"><div class="text-xs text-slate-400">Ochiq MT5 PnL (\${openPos.length} bitim)</div><div class="mt-2 text-2xl font-semibold font-mono tabular-nums \${openPnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}">\${openPnl >= 0 ? '+' : ''}\${fmtMoney(openPnl)}</div></div>
           <div class="rounded-xl border neon-surface p-5"><div class="text-xs text-slate-400">Faol MT5 Narxi</div><div class="mt-2 text-2xl font-semibold font-mono tabular-nums text-[#FF7AA5]">\${pair.symbol} · \${fmtPrice(pair.price)}</div><div class="mt-1 text-xs font-mono text-slate-400">Spred: \${pair.spreadPoints || 0} pt</div></div>
-          <div class="rounded-xl border neon-surface p-5"><div class="text-xs text-slate-400">MT5 Ulanish Holati</div><div class="mt-2 text-sm font-semibold text-emerald-400">\${state.mt5Status}</div><div class="mt-1 text-xs text-slate-400">\${state.serverName || 'MetaTrader 5'}</div></div>
+          <div class="rounded-xl border neon-surface p-5"><div class="text-xs text-slate-400">MT5 Ulanish Holati</div><div class="mt-2 text-sm font-semibold \${state.login ? 'text-emerald-400' : 'text-amber-400'}">\${state.mt5Status}</div><div class="mt-1 text-xs text-slate-400">\${state.serverName || 'MetaTrader 5'}</div></div>
         </div>
         <div class="grid grid-cols-1 xl:grid-cols-12 gap-6">
           <div class="xl:col-span-8 rounded-xl border neon-surface p-5">
@@ -414,7 +461,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
                 <select id="tk-pair-sel" class="px-3 py-1.5 text-sm font-semibold rounded-lg bg-[#0D1320] border border-slate-700 text-[#FF7AA5]">
                   \${state.pairs.map(p => '<option value="' + p.symbol + '" ' + (p.symbol === state.selectedSymbol ? 'selected' : '') + '>' + p.symbol + '</option>').join('')}
                 </select>
-                <span class="text-xs font-mono text-slate-400">Manba: \${state.candleSource}</span>
+                <span class="text-xs font-mono \${state.candleSource === 'MT5 Real Shamlar' ? 'text-emerald-400' : 'text-slate-400'}">Manba: \${state.candleSource}</span>
               </div>
               <div class="flex gap-1">
                 \${['M1','M5','M15','H1','H4','D1'].map(tf => '<button data-tf="' + tf + '" class="tk-tf-btn px-2.5 py-1 text-xs rounded ' + (state.timeframe === tf ? 'bg-[#F25F8C]/20 text-[#FF7AA5]' : 'text-slate-400') + '">' + tf + '</button>').join('')}
@@ -426,15 +473,38 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
           <div class="xl:col-span-4 rounded-xl border neon-surface p-5 space-y-4">
             <h3 class="text-base font-semibold pb-3 border-b border-slate-800">MT5 Tezkor Order (\${pair.symbol})</h3>
             <div class="grid grid-cols-2 gap-2">
-              <button id="tk-buy-btn" class="py-2.5 rounded-lg bg-emerald-500 text-slate-950 font-semibold text-sm">BUY (Bozor)</button>
-              <button id="tk-sell-btn" class="py-2.5 rounded-lg bg-rose-500 text-white font-semibold text-sm">SELL (Bozor)</button>
+              <button id="tk-side-buy" class="py-2 rounded-lg text-xs font-semibold \${state.orderSide === 'BUY' ? 'bg-emerald-500 text-slate-950' : 'bg-[#0D1320] text-slate-400 border border-slate-800'}">BUY · Long</button>
+              <button id="tk-side-sell" class="py-2 rounded-lg text-xs font-semibold \${state.orderSide === 'SELL' ? 'bg-rose-500 text-white' : 'bg-[#0D1320] text-slate-400 border border-slate-800'}">SELL · Short</button>
             </div>
             <div class="space-y-3 text-xs">
-              <div><label class="block text-slate-400 mb-1">Lot hajmi</label><input id="tk-lot" type="number" step="0.01" min="0.01" value="0.10" class="w-full px-3 py-2 rounded-lg bg-[#0D1320] border border-slate-700 font-mono" /></div>
+              <div><label class="block text-slate-400 mb-1">Lot hajmi</label><input id="tk-lot" type="number" step="0.01" min="0.01" value="\${state.orderLot}" class="w-full px-3 py-2 rounded-lg bg-[#0D1320] border border-slate-700 font-mono" /></div>
               <div class="grid grid-cols-2 gap-2">
-                <div><label class="block text-slate-400 mb-1">Stop-Loss</label><input id="tk-sl" type="number" step="any" placeholder="ixtiyoriy" class="w-full px-3 py-2 rounded-lg bg-[#0D1320] border border-slate-700 font-mono" /></div>
-                <div><label class="block text-slate-400 mb-1">Take-Profit</label><input id="tk-tp" type="number" step="any" placeholder="ixtiyoriy" class="w-full px-3 py-2 rounded-lg bg-[#0D1320] border border-slate-700 font-mono" /></div>
+                <div><label class="block text-slate-400 mb-1">Stop-Loss</label><input id="tk-sl" type="number" step="any" value="\${state.orderSl || rk.defaultSl}" class="w-full px-3 py-2 rounded-lg bg-[#0D1320] border border-slate-700 font-mono" /></div>
+                <div><label class="block text-slate-400 mb-1">Take-Profit</label><input id="tk-tp" type="number" step="any" value="\${state.orderTp || rk.defaultTp}" class="w-full px-3 py-2 rounded-lg bg-[#0D1320] border border-slate-700 font-mono" /></div>
               </div>
+              <div class="rounded-lg border border-[#F25F8C]/30 bg-[#0D1320] p-3 space-y-2.5">
+                <div class="flex items-center justify-between">
+                  <span class="font-semibold text-[#FF7AA5]">Risk kalkulyatori</span>
+                  <span class="font-mono text-slate-400">Equity: \${fmtMoney(state.equity)}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <input id="tk-risk-pct" type="number" step="0.1" min="0.1" max="25" value="\${state.riskPct}" class="w-16 px-2 py-1 rounded bg-[#131B2B] border border-slate-700 font-mono" />
+                  <span class="text-slate-400 mr-1">%</span>
+                  \${['0.5','1','2','3'].map(p => '<button data-risk="' + p + '" class="tk-risk-preset px-2 py-1 rounded border font-mono ' + (state.riskPct === p ? 'border-[#F25F8C]/50 bg-[#F25F8C]/15 text-[#FF7AA5]' : 'border-slate-800 text-slate-400') + '">' + p + '%</button>').join('')}
+                </div>
+                <div class="flex items-center justify-between pt-1 border-t border-slate-800">
+                  <div>
+                    <div class="text-[11px] text-slate-400">Optimal lot</div>
+                    <div id="tk-opt-lot" class="font-mono font-semibold text-[#FF7AA5]">\${rk.suggestedLot !== null ? rk.suggestedLot.toFixed(2) + ' lot ≈ ' + fmtMoney(rk.riskBudget) : 'SL kiriting'}</div>
+                  </div>
+                  \${rk.suggestedLot !== null ? '<button id="tk-apply-lot" class="px-2.5 py-1 rounded bg-gradient-to-r from-[#F25F8C] to-[#E87769] text-slate-950 font-semibold">Qo‘llash</button>' : ''}
+                </div>
+                <div class="flex items-center justify-between text-[11px] font-mono text-slate-400">
+                  <span>Joriy xavf: <strong class="text-rose-400">\${rk.curRiskUsd !== null ? '-' + fmtMoney(rk.curRiskUsd) : '—'}</strong></span>
+                  <span>R:R <strong class="text-emerald-400">\${rk.rr ? '1 : ' + rk.rr : '—'}</strong></span>
+                </div>
+              </div>
+              <button id="tk-send-order-btn" class="w-full py-2.5 rounded-lg font-semibold text-sm \${state.orderSide === 'BUY' ? 'bg-emerald-500 text-slate-950' : 'bg-rose-500 text-white'}">\${state.orderSide} (\${pair.symbol}) buyurtma yuborish</button>
               \${state.orderMsg ? '<p class="text-xs font-mono text-[#FF7AA5]">' + state.orderMsg + '</p>' : ''}
             </div>
           </div>
@@ -470,8 +540,11 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       const lot = parseFloat(document.getElementById('tk-lot').value) || 0.1;
       const slVal = parseFloat(document.getElementById('tk-sl').value);
       const tpVal = parseFloat(document.getElementById('tk-tp').value);
+      state.orderLot = String(lot);
+      if (!isNaN(slVal)) state.orderSl = String(slVal);
+      if (!isNaN(tpVal)) state.orderTp = String(tpVal);
       try {
-        const res = await fetch('/api/orders', {
+        const res = await fetch(apiUrl('/api/orders'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -494,19 +567,38 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
 
     function bind() {
       const pairSel = document.getElementById('tk-pair-sel');
-      if (pairSel) pairSel.onchange = async (e) => { state.selectedSymbol = e.target.value; await fetchMt5Candles(); render(); };
+      if (pairSel) pairSel.onchange = async (e) => { state.selectedSymbol = e.target.value; state.orderSl = ''; state.orderTp = ''; await fetchMt5Candles(); render(); };
       document.querySelectorAll('.tk-tf-btn').forEach(b => {
         b.onclick = async () => { state.timeframe = b.dataset.tf; await fetchMt5Candles(); render(); };
       });
-      const buyBtn = document.getElementById('tk-buy-btn');
-      if (buyBtn) buyBtn.onclick = () => sendOrder('BUY');
-      const sellBtn = document.getElementById('tk-sell-btn');
-      if (sellBtn) sellBtn.onclick = () => sendOrder('SELL');
+      const sideBuy = document.getElementById('tk-side-buy');
+      if (sideBuy) sideBuy.onclick = () => { state.orderSide = 'BUY'; state.orderSl = ''; state.orderTp = ''; render(); };
+      const sideSell = document.getElementById('tk-side-sell');
+      if (sideSell) sideSell.onclick = () => { state.orderSide = 'SELL'; state.orderSl = ''; state.orderTp = ''; render(); };
+      const lotInp = document.getElementById('tk-lot');
+      if (lotInp) lotInp.oninput = (e) => { state.orderLot = e.target.value; };
+      const slInp = document.getElementById('tk-sl');
+      if (slInp) slInp.oninput = (e) => { state.orderSl = e.target.value; };
+      const tpInp = document.getElementById('tk-tp');
+      if (tpInp) tpInp.oninput = (e) => { state.orderTp = e.target.value; };
+      const riskInp = document.getElementById('tk-risk-pct');
+      if (riskInp) riskInp.onchange = (e) => { state.riskPct = e.target.value; render(); };
+      document.querySelectorAll('.tk-risk-preset').forEach(b => {
+        b.onclick = () => { state.riskPct = b.dataset.risk; render(); };
+      });
+      const applyLotBtn = document.getElementById('tk-apply-lot');
+      if (applyLotBtn) applyLotBtn.onclick = () => {
+        const pair = state.pairs.find(p => p.symbol === state.selectedSymbol) || state.pairs[0];
+        const rk = computeOrderRisk(pair);
+        if (rk.suggestedLot !== null) { state.orderLot = rk.suggestedLot.toFixed(2); render(); }
+      };
+      const sendBtn = document.getElementById('tk-send-order-btn');
+      if (sendBtn) sendBtn.onclick = () => sendOrder(state.orderSide);
 
       document.querySelectorAll('.tk-close-pos').forEach(btn => {
         btn.onclick = async () => {
           try {
-            await fetch('/api/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ positionId: btn.dataset.closeId }) });
+            await fetch(apiUrl('/api/close'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ positionId: btn.dataset.closeId }) });
             await syncMt5();
           } catch (_) {}
         };
@@ -519,7 +611,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       if (sumBtn) {
         sumBtn.onclick = async () => {
           try {
-            const res = await fetch('/api/ai/summary', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ context: { symbol: state.selectedSymbol } }) });
+            const res = await fetch(apiUrl('/api/ai/summary'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ context: { symbol: state.selectedSymbol } }) });
             state.aiSummary = await res.json();
           } catch (_) {
             state.aiSummary = { headline: 'Xulosa olib bo‘lmadi: python mt5_bridge.py va proksini tekshiring.' };
@@ -535,7 +627,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       if (btRun) {
         btRun.onclick = async () => {
           try {
-            const res = await fetch('/api/candles?symbol=' + encodeURIComponent(state.selectedSymbol) + '&timeframe=' + state.timeframe + '&count=500');
+            const res = await fetch(apiUrl('/api/candles?symbol=' + encodeURIComponent(state.selectedSymbol) + '&timeframe=' + state.timeframe + '&count=500'));
             const data = await res.json();
             const bars = data.candles || [];
             const closes = bars.map(x => x.close);
@@ -581,7 +673,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
           inp.value = '';
           render();
           try {
-            const res = await fetch('/api/ai/chat', {
+            const res = await fetch(apiUrl('/api/ai/chat'), {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ messages: state.chat, fullPermissions: state.fullPermissions })
@@ -603,7 +695,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
     document.getElementById('tk-test-btn').onclick = runConnectionTest;
     document.getElementById('tk-live-btn').onclick = () => { state.autoSync = !state.autoSync; render(); };
     document.getElementById('tk-kill-all-btn').onclick = async () => {
-      try { await fetch('/api/kill-all', { method: 'POST' }); } catch (_) {}
+      try { await fetch(apiUrl('/api/kill-all'), { method: 'POST' }); } catch (_) {}
       await syncMt5();
     };
 

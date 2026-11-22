@@ -13,14 +13,16 @@ Oson ishga tushirish (VS Code terminalida):
 import json
 import math
 import os
+import threading
+import webbrowser
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import httpx
 import MetaTrader5 as mt5
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 
 
@@ -56,11 +58,37 @@ app = FastAPI(title="Trade Killer MT5 + 6-Strategy AI Bridge")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def add_pna_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        from fastapi.responses import Response
+        resp = Response(status_code=204)
+    else:
+        resp = await call_next(request)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "*"
+    resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    return resp
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WATCH_SYMBOLS = ["XAUUSD", "EURUSD", "BTCUSD", "GBPUSD", "US100", "USDJPY"]
+
+SYMBOL_ALIASES: Dict[str, List[str]] = {
+    "XAUUSD": ["XAUUSD", "GOLD", "XAUUSDm", "XAUUSD.r", "XAUUSDc", "XAUUSDpro"],
+    "EURUSD": ["EURUSD", "EURUSDm", "EURUSD.r", "EURUSDc", "EURUSDpro"],
+    "GBPUSD": ["GBPUSD", "GBPUSDm", "GBPUSD.r", "GBPUSDc", "GBPUSDpro"],
+    "USDJPY": ["USDJPY", "USDJPYm", "USDJPY.r", "USDJPYc", "USDJPYpro"],
+    "BTCUSD": ["BTCUSD", "BTCUSDT", "BTCUSDm", "BITCOIN", "#Bitcoin"],
+    "US100": ["US100", "USTEC", "NAS100", "NDX", "NQ100", "US100Cash", "USTECm"],
+}
 
 TF_MAP = {
     "M1": mt5.TIMEFRAME_M1,
@@ -76,16 +104,80 @@ TF_MAP = {
 def ensure_mt5() -> None:
     if not mt5.initialize():
         code, msg = mt5.last_error()
-        raise HTTPException(status_code=500, detail=f"MT5 ulanmadi ({code}): {msg}")
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"MT5 ulanmadi ({code}): {msg}. "
+                "Kompyuterda MetaTrader 5 ochiq va hisobga kirilgan bo'lsin "
+                "(agar MT5 Administrator sifatida ochilgan bo'lsa, VS Code ni ham Administrator qilib oching)."
+            ),
+        )
+
+
+def resolve_mt5_symbol(requested: str) -> str:
+    """Broker sufiks va nom farqlarini (masalan XAUUSDm, GOLD, USTEC) avtomatik topadi."""
+    ensure_mt5()
+    req = (requested or "XAUUSD").strip()
+    if mt5.symbol_info(req) is not None:
+        return req
+
+    all_syms = mt5.symbols_get() or []
+    if not all_syms:
+        return req
+
+    by_upper = {s.name.upper(): s for s in all_syms}
+    candidates = SYMBOL_ALIASES.get(req.upper(), [req])
+
+    # 1. Exact alias match
+    for cand in candidates:
+        if cand.upper() in by_upper:
+            return by_upper[cand.upper()].name
+
+    # 2. Prefix match (prefer visible Market Watch symbols first)
+    ordered = sorted(all_syms, key=lambda s: (not s.visible, len(s.name)))
+    for cand in candidates:
+        cu = cand.upper()
+        for s in ordered:
+            su = s.name.upper()
+            if su.startswith(cu) and len(su) <= len(cu) + 6:
+                return s.name
+
+    return req
+
+
+def discover_mt5_symbols() -> List[str]:
+    """Asosiy WATCH_SYMBOLS va MT5 Market Watch dagi ochiq instrumentlarni birlashtiradi."""
+    ensure_mt5()
+    all_syms = mt5.symbols_get() or []
+    resolved: List[str] = []
+    seen = set()
+
+    for base_sym in WATCH_SYMBOLS:
+        actual = resolve_mt5_symbol(base_sym)
+        if mt5.symbol_info(actual) is not None and actual not in seen:
+            resolved.append(actual)
+            seen.add(actual)
+
+    for s in all_syms:
+        if s.visible and s.name not in seen:
+            resolved.append(s.name)
+            seen.add(s.name)
+            if len(resolved) >= 20:
+                break
+
+    if not resolved and all_syms:
+        for s in all_syms[:8]:
+            resolved.append(s.name)
+    return resolved
 
 
 def read_mt5_candles(symbol: str, timeframe: str = "M5", count: int = 200) -> List[Dict[str, Any]]:
-    ensure_mt5()
-    mt5.symbol_select(symbol, True)
+    actual = resolve_mt5_symbol(symbol)
+    mt5.symbol_select(actual, True)
     tf = TF_MAP.get(timeframe.upper(), mt5.TIMEFRAME_M5)
-    rates = mt5.copy_rates_from_pos(symbol, tf, 0, min(max(count, 20), 5000))
+    rates = mt5.copy_rates_from_pos(actual, tf, 0, min(max(count, 20), 5000))
     if rates is None or len(rates) == 0:
-        raise HTTPException(status_code=404, detail=f"{symbol} uchun MT5 shamlari olinmadi.")
+        raise HTTPException(status_code=404, detail=f"{actual} uchun MT5 shamlari olinmadi.")
 
     candles = []
     for r in rates:
@@ -361,14 +453,15 @@ def snapshot_mt5_state() -> Dict[str, Any]:
     }
 
     pairs = []
-    for sym in WATCH_SYMBOLS:
+    for sym in discover_mt5_symbols():
         mt5.symbol_select(sym, True)
         info = mt5.symbol_info(sym)
         tick = mt5.symbol_info_tick(sym)
-        if info and tick:
+        if info and tick and (float(tick.bid) > 0 or float(tick.last) > 0):
+            last_bid = float(tick.bid) if float(tick.bid) > 0 else float(tick.last)
             rates_h1 = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H1, 0, 24)
-            high24 = float(tick.bid)
-            low24 = float(tick.bid)
+            high24 = last_bid
+            low24 = last_bid
             change24 = 0.0
             vol24 = 0
             rsi_val = 50.0
@@ -381,7 +474,7 @@ def snapshot_mt5_state() -> Dict[str, Any]:
                 low24 = min(lows_24)
                 open_first = float(rates_h1[0]["open"])
                 if open_first > 0:
-                    change24 = round(((float(tick.bid) - open_first) / open_first) * 100.0, 2)
+                    change24 = round(((last_bid - open_first) / open_first) * 100.0, 2)
                 vol24 = int(sum(int(r["tick_volume"]) for r in rates_h1))
                 rsi_arr = _calc_rsi_rma(closes_24, min(14, max(2, len(closes_24) - 1)))
                 rsi_val = round(rsi_arr[-1], 1) if rsi_arr else 50.0
@@ -390,14 +483,15 @@ def snapshot_mt5_state() -> Dict[str, Any]:
                 elif change24 < -0.12:
                     trend_label = "Pasayish"
 
-            base_ccy = sym[:3]
-            quote_ccy = sym[3:] if len(sym) > 3 else "USD"
+            clean_sym = sym.split(".")[0].rstrip("mc_")
+            base_ccy = getattr(info, "currency_base", "") or clean_sym[:3]
+            quote_ccy = getattr(info, "currency_profit", "") or (clean_sym[3:6] if len(clean_sym) >= 6 else "USD")
             pairs.append({
                 "symbol": sym,
                 "base": base_ccy,
                 "quote": quote_ccy,
-                "price": float(tick.bid),
-                "ask": float(tick.ask),
+                "price": last_bid,
+                "ask": float(tick.ask) if float(tick.ask) > 0 else last_bid,
                 "spreadPoints": int(info.spread),
                 "change24h": change24,
                 "high24h": high24,
@@ -405,7 +499,7 @@ def snapshot_mt5_state() -> Dict[str, Any]:
                 "volume24h": vol24,
                 "rsi14": rsi_val,
                 "trend": trend_label,
-                "contractSize": float(info.trade_contract_size),
+                "contractSize": float(info.trade_contract_size) or 100.0,
             })
 
     raw_positions = mt5.positions_get() or []
@@ -436,6 +530,21 @@ def snapshot_mt5_state() -> Dict[str, Any]:
     return {"account": account_data, "pairs": pairs, "positions": positions}
 
 
+def _send_with_filling_fallback(request: Dict[str, Any]):
+    modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK, mt5.ORDER_FILLING_RETURN]
+    last_res = None
+    for mode in modes:
+        req = dict(request)
+        req["type_filling"] = mode
+        res = mt5.order_send(req)
+        last_res = res
+        if res is not None and res.retcode == mt5.TRADE_RETCODE_DONE:
+            return res
+        if res is not None and res.retcode not in (10030,):
+            break
+    return last_res
+
+
 def execute_mt5_order(
     symbol: str,
     side: str,
@@ -444,33 +553,41 @@ def execute_mt5_order(
     tp: Optional[float] = None,
     comment: str = "TradeKillerAI",
 ) -> Dict[str, Any]:
-    ensure_mt5()
-    mt5.symbol_select(symbol, True)
-    tick = mt5.symbol_info_tick(symbol)
-    if not tick:
-        raise HTTPException(status_code=404, detail=f"{symbol} narxi topilmadi.")
+    actual = resolve_mt5_symbol(symbol)
+    t_info = mt5.terminal_info()
+    if t_info is not None and not getattr(t_info, "trade_allowed", True):
+        raise HTTPException(
+            status_code=400,
+            detail="MT5 da 'Algo Trading' tugmasi o'chiq! MT5 dasturining tepasidagi Algo Trading tugmasini yashil qilib yoqing.",
+        )
 
+    mt5.symbol_select(actual, True)
+    info = mt5.symbol_info(actual)
+    tick = mt5.symbol_info_tick(actual)
+    if not tick:
+        raise HTTPException(status_code=404, detail=f"{actual} narxi topilmadi.")
+
+    digits = int(getattr(info, "digits", 5)) if info else 5
     order_type = mt5.ORDER_TYPE_BUY if side.upper() in ("LONG", "BUY") else mt5.ORDER_TYPE_SELL
     price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
 
-    result = mt5.order_send({
+    result = _send_with_filling_fallback({
         "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
+        "symbol": actual,
         "volume": float(lot_size),
         "type": order_type,
         "price": price,
-        "sl": float(sl) if sl else 0.0,
-        "tp": float(tp) if tp else 0.0,
-        "deviation": 20,
+        "sl": round(float(sl), digits) if sl else 0.0,
+        "tp": round(float(tp), digits) if tp else 0.0,
+        "deviation": 30,
         "magic": 202601,
         "comment": comment[:30],
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_IOC,
     })
     if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
-        detail = result.comment if result else str(mt5.last_error())
+        detail = f"{result.retcode}: {result.comment}" if result else str(mt5.last_error())
         raise HTTPException(status_code=400, detail=f"MT5 order xatosi: {detail}")
-    return {"ticket": result.order, "price": result.price, "volume": result.volume}
+    return {"ticket": result.order, "price": result.price, "volume": result.volume, "symbol": actual}
 
 
 def close_mt5_ticket(position_id: str) -> List[int]:
@@ -482,20 +599,21 @@ def close_mt5_ticket(position_id: str) -> List[int]:
     closed = []
     for p in targets:
         tick = mt5.symbol_info_tick(p.symbol)
+        if not tick:
+            continue
         close_type = mt5.ORDER_TYPE_SELL if p.type == mt5.POSITION_TYPE_BUY else mt5.ORDER_TYPE_BUY
         price = tick.bid if close_type == mt5.ORDER_TYPE_SELL else tick.ask
-        res = mt5.order_send({
+        res = _send_with_filling_fallback({
             "action": mt5.TRADE_ACTION_DEAL,
             "symbol": p.symbol,
             "volume": p.volume,
             "type": close_type,
             "position": p.ticket,
             "price": price,
-            "deviation": 20,
+            "deviation": 30,
             "magic": 202601,
             "comment": "TradeKillerClose",
             "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
         })
         if res and res.retcode == mt5.TRADE_RETCODE_DONE:
             closed.append(p.ticket)
@@ -607,7 +725,20 @@ class ScanPayload(BaseModel):
 
 @app.get("/")
 def serve_ui():
-    return FileResponse("index.html")
+    index_path = os.path.join(BASE_DIR, "index.html")
+    if os.path.isfile(index_path):
+        return FileResponse(index_path)
+    return HTMLResponse(
+        content=f"""<!doctype html>
+<html lang="uz"><head><meta charset="utf-8"/><title>Trade Killer AI · MT5 Bridge</title></head>
+<body style="background:#0C111C;color:#E2E8F0;font-family:system-ui,sans-serif;padding:40px;line-height:1.6;">
+  <h2 style="color:#F25F8C;">MT5 Bridge serveri ishlab turibdi (127.0.0.1:8000)</h2>
+  <p>Biroq <code>index.html</code> fayli ushbu papkada topilmadi:</p>
+  <pre style="background:#131B2B;padding:12px;border-radius:8px;">{BASE_DIR}</pre>
+  <p>Saytdagi <b>index.html yuklab olish</b> tugmasi orqali faylni yuklab, aynan shu papkaga qo'ying va sahifani yangilang (F5).</p>
+</body></html>""",
+        status_code=200,
+    )
 
 
 @app.get("/api/health")
@@ -681,7 +812,8 @@ def get_candles(
     timeframe: str = Query("M5"),
     count: int = Query(180),
 ):
-    return {"symbol": symbol, "timeframe": timeframe, "candles": read_mt5_candles(symbol, timeframe, count)}
+    resolved = resolve_mt5_symbol(symbol)
+    return {"symbol": resolved, "timeframe": timeframe, "candles": read_mt5_candles(resolved, timeframe, count)}
 
 
 @app.get("/api/brain")
@@ -689,8 +821,9 @@ def get_strategy_brain(
     symbol: str = Query("XAUUSD"),
     timeframe: str = Query("M5"),
 ):
-    candles = read_mt5_candles(symbol, timeframe, 220)
-    return compute_strategy_brain(candles, symbol, timeframe)
+    resolved = resolve_mt5_symbol(symbol)
+    candles = read_mt5_candles(resolved, timeframe, 220)
+    return compute_strategy_brain(candles, resolved, timeframe)
 
 
 @app.post("/api/orders")
@@ -717,7 +850,7 @@ def kill_all():
 async def ai_chat(body: ChatPayload):
     state = snapshot_mt5_state()
     strategy_brains = {}
-    for sym in WATCH_SYMBOLS[:4]:
+    for sym in discover_mt5_symbols()[:4]:
         try:
             bars_m5 = read_mt5_candles(sym, "M5", 200)
             strategy_brains[sym] = compute_strategy_brain(bars_m5, sym, "M5")
@@ -803,7 +936,7 @@ async def ai_chat(body: ChatPayload):
 async def ai_summary(body: SummaryPayload):
     state = snapshot_mt5_state()
     brains = {}
-    for sym in WATCH_SYMBOLS[:4]:
+    for sym in discover_mt5_symbols()[:4]:
         try:
             brains[sym] = compute_strategy_brain(read_mt5_candles(sym, "M5", 200), sym, "M5")
         except Exception:
@@ -826,7 +959,7 @@ async def ai_summary(body: SummaryPayload):
 @app.post("/api/ai/scan")
 async def ai_scan(body: ScanPayload):
     brains = []
-    for sym in WATCH_SYMBOLS:
+    for sym in discover_mt5_symbols()[:8]:
         try:
             brains.append(compute_strategy_brain(read_mt5_candles(sym, "M5", 200), sym, "M5"))
         except Exception:
@@ -851,11 +984,13 @@ if __name__ == "__main__":
     cfg = get_proxy_settings()
     print("=" * 60)
     print(" Trade Killer AI · MT5 & Lokal AI Proksi Serveri")
-    print(f" .env yuklandi: {'Ha' if ENV_LOADED else 'Yoq (muhit ozgaruvchilari ishlatiladi)'}")
+    print(f" Papka        : {BASE_DIR}")
+    print(f" .env yuklandi: {'Ha' if ENV_LOADED else 'Yoq (ixtiyoriy - faqat AI proksi uchun)'}")
     print(f" AI Proksi URL: {cfg['base_url']} (model={cfg['model']})")
-    print(f" API Kalit    : {'Kiritilgan' if cfg['api_key'] else 'TOPILMADI (.env ga yozing)'}")
+    print(f" API Kalit    : {'Kiritilgan' if cfg['api_key'] else 'Kiritilmagan (MT5 baribir ishlaydi)'}")
     print(" Brauzer      : http://127.0.0.1:8000")
     print("=" * 60)
+    threading.Timer(1.2, lambda: webbrowser.open("http://127.0.0.1:8000")).start()
     uvicorn.run(app, host="127.0.0.1", port=8000)
 `;
 }
