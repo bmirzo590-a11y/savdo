@@ -44,6 +44,11 @@ import {
   BacktestParams,
   BacktestStrategyId,
   CandlePoint,
+  ControlStateRecord,
+  DiagnosticBlocker,
+  EngineMetricsRecord,
+  ExecutionLogEntry,
+  InstrumentAnalysisSnapshot,
   LearningOutcome,
   LearningRecord,
   LiveSystemStatusSnapshot,
@@ -72,6 +77,7 @@ import { PinLoginScreen } from './components/PinLoginScreen';
 import { StrategyRegistryView } from './components/StrategyRegistryView';
 import { HistoricalMemoryView } from './components/HistoricalMemoryView';
 import { AutoTradingView } from './components/AutoTradingView';
+import { AutonomousDiagnosticsPanel } from './components/AutonomousDiagnosticsPanel';
 import { NotificationsView } from './components/NotificationsView';
 import { OwnerCenterView } from './components/OwnerCenterView';
 import { LearningHistoryView } from './components/LearningHistoryView';
@@ -157,6 +163,9 @@ export default function App() {
     marginFree: number;
     profit: number;
     realizedToday: number;
+    tradeMode?: 'DEMO' | 'REAL' | 'CONTEST' | 'SIMULATED';
+    tradeAllowed?: boolean;
+    investorReadOnly?: boolean;
   } | null>(null);
   const [mt5Connected, setMt5Connected] = useState<boolean>(false);
   const [mt5SyncStatus, setMt5SyncStatus] = useState<
@@ -176,10 +185,18 @@ export default function App() {
   const [mtfCandlesByTf, setMtfCandlesByTf] = useState<Partial<Record<Timeframe, CandlePoint[]>>>({});
   const [learningJournal, setLearningJournal] = useState<LearningRecord[]>(() => loadLearningJournal());
 
-  // Refs for deduplicating live event notifications & tracking idle timeout
+  // Autonomous AI Engine & LLM live feedback state
+  const [aiEngineBusy, setAiEngineBusy] = useState<boolean>(false);
+  const [lastAiBriefUz, setLastAiBriefUz] = useState<string | null>(null);
+  const [lastAiProvider, setLastAiProvider] = useState<string | null>(null);
+  const [lastAiError, setLastAiError] = useState<string | null>(null);
+
+  // Refs for deduplicating live event notifications, idle timeout, and autonomous throttling
   const lastActivityRef = useRef<number>(Date.now());
   const prevMt5ConnectedRef = useRef<boolean | null>(null);
   const lastEventKeyRef = useRef<string>('');
+  const lastLlmRunRef = useRef<number>(0);
+  const engineRunningRef = useRef<boolean>(false);
 
   const handleStyleChange = (style: TradingStyle) => {
     setTradingStyle(style);
@@ -345,6 +362,9 @@ export default function App() {
       margin_free?: number;
       profit?: number;
       realizedToday?: number;
+      tradeMode?: string;
+      tradeAllowed?: boolean;
+      investorReadOnly?: boolean;
     };
     pairs?: MarketPair[];
     positions?: Position[];
@@ -355,6 +375,11 @@ export default function App() {
       const mf = Number(data.account.margin_free ?? bal);
       const prof = Number(data.account.profit ?? 0);
       const realToday = Number(data.account.realizedToday ?? 0);
+      const rawMode = String(data.account.tradeMode ?? 'DEMO').toUpperCase();
+      const tradeMode: 'DEMO' | 'REAL' | 'CONTEST' | 'SIMULATED' =
+        rawMode === 'REAL' || rawMode === 'CONTEST' || rawMode === 'DEMO'
+          ? rawMode
+          : 'DEMO';
       setMt5Account({
         login: Number(data.account.login ?? 0),
         server: String(data.account.server ?? ''),
@@ -363,6 +388,9 @@ export default function App() {
         marginFree: mf,
         profit: prof,
         realizedToday: realToday,
+        tradeMode,
+        tradeAllowed: data.account.tradeAllowed ?? true,
+        investorReadOnly: Boolean(data.account.investorReadOnly),
       });
       setBaseBalance(bal);
       if (data.account.login) {
@@ -498,22 +526,7 @@ export default function App() {
     }
   }, [authSession, mt5Connected, pushSystemEvent, serverConfig.mt5Login]);
 
-  // 24/7 Scanner Heartbeat when authenticated & scanner RUNNING
-  useEffect(() => {
-    if (!authSession || systemStatus?.control.scannerStatus !== 'RUNNING') return;
-    const sendHeartbeat = () => {
-      void apiJson('/api/system/control', {
-        method: 'POST',
-        body: JSON.stringify({
-          action: 'HEARTBEAT_SCAN',
-          instrumentsScanned: pairs.length,
-        }),
-      }).catch(() => {});
-    };
-    sendHeartbeat();
-    const timer = window.setInterval(sendHeartbeat, 20000);
-    return () => window.clearInterval(timer);
-  }, [authSession, systemStatus?.control.scannerStatus, pairs.length]);
+  // Continuous multi-instrument analysis & autonomous execution loop is mounted below after execution handlers.
 
   useEffect(() => {
     if (!authSession || !liveTicks || mt5Connected) return;
@@ -572,8 +585,9 @@ export default function App() {
         window.clearTimeout(timeout);
         if (!res.ok) return;
         const json = await res.json();
-        if (!cancelled && json?.timeframes && typeof json.timeframes === 'object') {
-          setMtfCandlesByTf(json.timeframes as Partial<Record<Timeframe, CandlePoint[]>>);
+        const tfMap = json?.candlesByTf ?? json?.timeframes;
+        if (!cancelled && tfMap && typeof tfMap === 'object') {
+          setMtfCandlesByTf(tfMap as Partial<Record<Timeframe, CandlePoint[]>>);
         }
       } catch {
         // Fallback to client MTF derivation when /api/mtf isn't running
@@ -799,18 +813,228 @@ export default function App() {
 
   const tradingBlocked = Boolean(systemStatus?.control.stopNewTrades);
 
-  const handlePlaceOrder = (order: Omit<Position, 'id' | 'openedAt'>) => {
+  const getCurrentAccountMode = (): 'MT5_DEMO' | 'MT5_REAL' | 'SIMULATED_DEMO' => {
+    if (!mt5Connected) return 'SIMULATED_DEMO';
+    return mt5Account?.tradeMode === 'REAL' ? 'MT5_REAL' : 'MT5_DEMO';
+  };
+
+  const recordEngineExecution = async (payload: {
+    type: 'ORDER_SENT' | 'ORDER_REJECTED' | 'SL_TP_MODIFIED' | 'BREAK_EVEN' | 'TRAILING_STOP' | 'AI_CLOSED';
+    symbol: string;
+    side?: 'LONG' | 'SHORT';
+    positionId?: string;
+    lotSize?: number;
+    entryPrice?: number;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+    pnlUsd?: number;
+    signalHash?: string;
+    source: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER';
+    reasonUz: string;
+    brokerMessage?: string;
+  }) => {
+    if (!authSession) return;
+    try {
+      const res = await apiJson<{
+        ok: boolean;
+        engineMetrics?: EngineMetricsRecord;
+        executionLogs?: ExecutionLogEntry[];
+      }>('/api/engine/record-execution', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...payload,
+          accountMode: getCurrentAccountMode(),
+        }),
+      });
+      if (res.engineMetrics || res.executionLogs) {
+        setSystemStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                engineMetrics: res.engineMetrics ?? prev.engineMetrics,
+                executionLogs: res.executionLogs ?? prev.executionLogs,
+              }
+            : prev
+        );
+      }
+    } catch {
+      // Non-blocking audit persistence error
+    }
+  };
+
+  const executeVerifiedOrder = async (
+    order: Omit<Position, 'id' | 'openedAt'>,
+    meta?: {
+      source?: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER';
+      signalHash?: string;
+      reasonUz?: string;
+    }
+  ): Promise<{ ok: boolean; positionId?: string; brokerMessage?: string }> => {
+    const source = meta?.source ?? 'OWNER';
+    const reasonUz = meta?.reasonUz ?? `${order.lotSize} lot @ ${formatPrice(order.entryPrice)} (${order.strategyName})`;
+
     if (tradingBlocked) {
       setControlFeedback('STOP NEW TRADES faol — yangi buyurtma bloklandi.');
       window.setTimeout(() => setControlFeedback(null), 4000);
-      return;
+      await recordEngineExecution({
+        type: 'ORDER_REJECTED',
+        symbol: order.symbol,
+        side: order.side,
+        lotSize: order.lotSize,
+        entryPrice: order.entryPrice,
+        stopLoss: order.stopLoss,
+        takeProfit: order.takeProfit,
+        source,
+        reasonUz: 'STOP NEW TRADES blokirovkasi faol.',
+        brokerMessage: 'TRADING_PERMISSION_DISABLED',
+      });
+      return { ok: false, brokerMessage: 'STOP NEW TRADES faol' };
     }
 
+    if (mt5Connected && (mt5Account?.investorReadOnly || mt5Account?.tradeAllowed === false)) {
+      const msg = 'MT5 hisob faqat o‘qish rejimida (Investor/Read-Only) — buyurtma rad etildi.';
+      setControlFeedback(msg);
+      window.setTimeout(() => setControlFeedback(null), 5000);
+      await recordEngineExecution({
+        type: 'ORDER_REJECTED',
+        symbol: order.symbol,
+        side: order.side,
+        lotSize: order.lotSize,
+        entryPrice: order.entryPrice,
+        stopLoss: order.stopLoss,
+        takeProfit: order.takeProfit,
+        source,
+        reasonUz: msg,
+        brokerMessage: 'ACCOUNT_READ_ONLY',
+      });
+      return { ok: false, brokerMessage: msg };
+    }
+
+    if (mt5Connected) {
+      const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
+      try {
+        const res = await fetch(`${base}/api/orders`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: order.symbol,
+            side: order.side,
+            lotSize: order.lotSize,
+            stopLoss: order.stopLoss,
+            takeProfit: order.takeProfit,
+          }),
+        });
+        let json: Record<string, unknown> = {};
+        try {
+          json = (await res.json()) as Record<string, unknown>;
+        } catch {
+          // non-JSON response
+        }
+
+        if (!res.ok) {
+          const brokerErr = String(json?.detail || json?.error || `MT5 HTTP ${res.status}`);
+          setControlFeedback(`Broker buyurtmani rad etdi (${order.symbol}): ${brokerErr}`);
+          window.setTimeout(() => setControlFeedback(null), 6000);
+          await recordEngineExecution({
+            type: 'ORDER_REJECTED',
+            symbol: order.symbol,
+            side: order.side,
+            lotSize: order.lotSize,
+            entryPrice: order.entryPrice,
+            stopLoss: order.stopLoss,
+            takeProfit: order.takeProfit,
+            source,
+            reasonUz,
+            brokerMessage: brokerErr,
+          });
+          return { ok: false, brokerMessage: brokerErr };
+        }
+
+        const ticketId = String(json?.ticket ?? json?.order ?? `MT5-${Date.now()}`);
+        await refreshMt5Now();
+        await recordEngineExecution({
+          type: 'ORDER_SENT',
+          symbol: order.symbol,
+          side: order.side,
+          positionId: ticketId,
+          lotSize: order.lotSize,
+          entryPrice: order.entryPrice,
+          stopLoss: order.stopLoss,
+          takeProfit: order.takeProfit,
+          signalHash: meta?.signalHash,
+          source,
+          reasonUz,
+          brokerMessage: `MT5 Ticket #${ticketId}`,
+        });
+        void pushSystemEvent(
+          source === 'OWNER' ? 'NORMAL' : 'HIGH',
+          'POSITION',
+          `${source === 'OWNER' ? 'Yangi' : 'Avto-AI'} ${order.side === 'LONG' ? 'BUY' : 'SELL'}: ${order.symbol}`,
+          `${order.lotSize} lot @ ${formatPrice(order.entryPrice)} · SL: ${order.stopLoss ? formatPrice(order.stopLoss) : '—'} · TP: ${order.takeProfit ? formatPrice(order.takeProfit) : '—'} (${order.strategyName}).`,
+          order.symbol
+        );
+        void apiJson('/api/memory/log-signal', {
+          method: 'POST',
+          body: JSON.stringify({
+            symbol: order.symbol,
+            timeframe: activeTimeframe,
+            direction: order.side === 'LONG' ? 'BUY' : 'SELL',
+            strategyName: order.strategyName,
+            entryPrice: order.entryPrice,
+            stopLoss: order.stopLoss ?? 0,
+            takeProfit: order.takeProfit ?? 0,
+            outcome: 'PENDING',
+            pnlUsd: 0,
+          }),
+        }).catch(() => {});
+        return { ok: true, positionId: ticketId };
+      } catch (err) {
+        const brokerErr = err instanceof Error ? err.message : 'MT5 Bridge ulanish xatosi';
+        await recordEngineExecution({
+          type: 'ORDER_REJECTED',
+          symbol: order.symbol,
+          side: order.side,
+          lotSize: order.lotSize,
+          entryPrice: order.entryPrice,
+          stopLoss: order.stopLoss,
+          takeProfit: order.takeProfit,
+          source,
+          reasonUz: 'MT5 Bridge bilan aloqa uzildi.',
+          brokerMessage: brokerErr,
+        });
+        return { ok: false, brokerMessage: brokerErr };
+      }
+    }
+
+    // Simulated Demo execution path (honestly labeled SIMULATED_DEMO)
+    const now = new Date().toLocaleTimeString('en-GB');
+    const newId = `DEMO-${Math.floor(508500 + Math.random() * 400000)}`;
+    const newPos: Position = {
+      ...order,
+      id: newId,
+      openedAt: now,
+    };
+    setPositions((prev) => [newPos, ...prev]);
+
+    await recordEngineExecution({
+      type: 'ORDER_SENT',
+      symbol: order.symbol,
+      side: order.side,
+      positionId: newId,
+      lotSize: order.lotSize,
+      entryPrice: order.entryPrice,
+      stopLoss: order.stopLoss,
+      takeProfit: order.takeProfit,
+      signalHash: meta?.signalHash,
+      source,
+      reasonUz,
+      brokerMessage: 'Simulyatsiya Demo order ochildi',
+    });
     void pushSystemEvent(
-      'NORMAL',
+      source === 'OWNER' ? 'NORMAL' : 'HIGH',
       'POSITION',
-      `Yangi ${order.side === 'LONG' ? 'BUY' : 'SELL'} buyurtma: ${order.symbol}`,
-      `${order.lotSize} lot @ ${formatPrice(order.entryPrice)} (${order.strategyName}).`,
+      `${source === 'OWNER' ? 'Yangi' : 'Avto-AI'} ${order.side === 'LONG' ? 'BUY' : 'SELL'} (Demo): ${order.symbol}`,
+      `${order.lotSize} lot @ ${formatPrice(order.entryPrice)} · SL: ${order.stopLoss ? formatPrice(order.stopLoss) : '—'} · TP: ${order.takeProfit ? formatPrice(order.takeProfit) : '—'} (${order.strategyName}).`,
       order.symbol
     );
     void apiJson('/api/memory/log-signal', {
@@ -828,85 +1052,659 @@ export default function App() {
       }),
     }).catch(() => {});
 
+    return { ok: true, positionId: newId };
+  };
+
+  const handlePlaceOrder = (order: Omit<Position, 'id' | 'openedAt'>) => {
+    void executeVerifiedOrder(order, {
+      source: 'OWNER',
+      reasonUz: `Qo‘lda order: ${order.lotSize} lot @ ${formatPrice(order.entryPrice)} (${order.strategyName})`,
+    });
+  };
+
+  const closeVerifiedPosition = async (
+    id: string,
+    meta?: {
+      source?: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER';
+      reasonUz?: string;
+    }
+  ): Promise<{ ok: boolean; brokerMessage?: string }> => {
+    const source = meta?.source ?? 'OWNER';
+    const targetPos = positions.find((p) => p.id === id);
+    const estPnl = targetPos
+      ? targetPos.sizeUsdt *
+        (targetPos.side === 'LONG'
+          ? (targetPos.markPrice - targetPos.entryPrice) / Math.max(1e-9, targetPos.entryPrice)
+          : (targetPos.entryPrice - targetPos.markPrice) / Math.max(1e-9, targetPos.entryPrice))
+      : undefined;
+
     if (mt5Connected) {
       const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
-      void fetch(`${base}/api/orders`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          symbol: order.symbol,
-          side: order.side,
-          lotSize: order.lotSize,
-          stopLoss: order.stopLoss,
-          takeProfit: order.takeProfit,
-        }),
-      }).then(() => refreshMt5Now());
-      return;
+      try {
+        const res = await fetch(`${base}/api/close`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ positionId: id }),
+        });
+        let json: Record<string, unknown> = {};
+        try {
+          json = (await res.json()) as Record<string, unknown>;
+        } catch {
+          // ignore
+        }
+        if (!res.ok) {
+          const errMsg = String(json?.detail || json?.error || `MT5 Close HTTP ${res.status}`);
+          return { ok: false, brokerMessage: errMsg };
+        }
+        await refreshMt5Now();
+      } catch (err) {
+        return { ok: false, brokerMessage: err instanceof Error ? err.message : 'MT5 close xatosi' };
+      }
+    } else {
+      const now = new Date().toLocaleTimeString('en-GB');
+      setPositions((prev) =>
+        prev.map((pos) => {
+          if (pos.id !== id || pos.status === 'CLOSED') return pos;
+          if (pos.status === 'PENDING') {
+            return { ...pos, status: 'CLOSED', closedAt: now, realizedPnl: 0 };
+          }
+          const diff =
+            pos.side === 'LONG'
+              ? (pos.markPrice - pos.entryPrice) / pos.entryPrice
+              : (pos.entryPrice - pos.markPrice) / pos.entryPrice;
+          const pnl = pos.sizeUsdt * diff;
+          setBaseBalance((b) => b + pnl);
+          return {
+            ...pos,
+            status: 'CLOSED',
+            closedAt: now,
+            realizedPnl: pnl,
+          };
+        })
+      );
     }
 
-    const now = new Date().toLocaleTimeString('en-GB');
-    const newPos: Position = {
-      ...order,
-      id: `MT5-${Math.floor(508500 + Math.random() * 4000)}`,
-      openedAt: now,
-    };
-    setPositions((prev) => [newPos, ...prev]);
+    if (source !== 'OWNER') {
+      await recordEngineExecution({
+        type: 'AI_CLOSED',
+        symbol: targetPos?.symbol ?? id,
+        side: targetPos?.side,
+        positionId: id,
+        pnlUsd: estPnl !== undefined ? Number(estPnl.toFixed(2)) : undefined,
+        source,
+        reasonUz: meta?.reasonUz ?? 'AI dinamik foyda/zarar himoyasi pozitsiyani yopdi.',
+      });
+    }
+
+    void pushSystemEvent(
+      source === 'OWNER' ? 'NORMAL' : 'HIGH',
+      'POSITION',
+      `${source === 'OWNER' ? 'Pozitsiya yopildi' : 'AI pozitsiyani yopdi'}: ${targetPos?.symbol ?? id}`,
+      meta?.reasonUz ?? 'Pozitsiya joriy bozor narxida yopildi.',
+      targetPos?.symbol
+    );
+    return { ok: true };
   };
 
   const handleClosePosition = (id: string) => {
-    void pushSystemEvent(
-      'NORMAL',
-      'POSITION',
-      `Pozitsiya yopildi: ${id}`,
-      'Foydalanuvchi buyrug‘i bilan pozitsiya joriy bozor narxida yopildi.'
-    );
+    void closeVerifiedPosition(id, { source: 'OWNER' });
+  };
+
+  const modifyVerifiedTargets = async (
+    id: string,
+    stopLoss: number | null,
+    takeProfit: number | null,
+    meta?: {
+      type?: 'SL_TP_MODIFIED' | 'BREAK_EVEN' | 'TRAILING_STOP';
+      source?: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER';
+      reasonUz?: string;
+    }
+  ): Promise<{ ok: boolean; brokerMessage?: string }> => {
+    const pos = positions.find((p) => p.id === id);
+    if (pos) {
+      const price = pos.markPrice > 0 ? pos.markPrice : pos.entryPrice;
+      if (pos.side === 'LONG') {
+        if (stopLoss !== null && stopLoss >= price) {
+          return { ok: false, brokerMessage: 'LONG uchun SL joriy narxdan past bo‘lishi kerak.' };
+        }
+        if (takeProfit !== null && takeProfit <= price) {
+          return { ok: false, brokerMessage: 'LONG uchun TP joriy narxdan yuqori bo‘lishi kerak.' };
+        }
+      } else {
+        if (stopLoss !== null && stopLoss <= price) {
+          return { ok: false, brokerMessage: 'SHORT uchun SL joriy narxdan yuqori bo‘lishi kerak.' };
+        }
+        if (takeProfit !== null && takeProfit >= price) {
+          return { ok: false, brokerMessage: 'SHORT uchun TP joriy narxdan past bo‘lishi kerak.' };
+        }
+      }
+    }
 
     if (mt5Connected) {
       const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
-      void fetch(`${base}/api/close`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ positionId: id }),
-      }).then(() => refreshMt5Now());
-      return;
+      try {
+        const res = await fetch(`${base}/api/modify`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ positionId: id, stopLoss, takeProfit }),
+        });
+        let json: Record<string, unknown> = {};
+        try {
+          json = (await res.json()) as Record<string, unknown>;
+        } catch {
+          // ignore
+        }
+        if (!res.ok) {
+          const errMsg = String(json?.detail || json?.error || `MT5 Modify HTTP ${res.status}`);
+          return { ok: false, brokerMessage: errMsg };
+        }
+        await refreshMt5Now();
+      } catch (err) {
+        return { ok: false, brokerMessage: err instanceof Error ? err.message : 'MT5 modify xatosi' };
+      }
     }
 
-    const now = new Date().toLocaleTimeString('en-GB');
     setPositions((prev) =>
-      prev.map((pos) => {
-        if (pos.id !== id || pos.status === 'CLOSED') return pos;
-        if (pos.status === 'PENDING') {
-          return { ...pos, status: 'CLOSED', closedAt: now, realizedPnl: 0 };
-        }
-        const diff =
-          pos.side === 'LONG'
-            ? (pos.markPrice - pos.entryPrice) / pos.entryPrice
-            : (pos.entryPrice - pos.markPrice) / pos.entryPrice;
-        const pnl = pos.sizeUsdt * diff;
-        setBaseBalance((b) => b + pnl);
-        return {
-          ...pos,
-          status: 'CLOSED',
-          closedAt: now,
-          realizedPnl: pnl,
-        };
-      })
+      prev.map((p) => (p.id === id ? { ...p, stopLoss, takeProfit } : p))
     );
+
+    if (meta?.source && meta.source !== 'OWNER') {
+      await recordEngineExecution({
+        type: meta.type ?? 'SL_TP_MODIFIED',
+        symbol: pos?.symbol ?? id,
+        side: pos?.side,
+        positionId: id,
+        stopLoss,
+        takeProfit,
+        source: meta.source,
+        reasonUz: meta.reasonUz ?? 'AI dinamik SL/TP boshqaruvi yangilandi.',
+      });
+    }
+    return { ok: true };
   };
 
   const handleUpdateTargets = (id: string, stopLoss: number | null, takeProfit: number | null) => {
-    if (mt5Connected) {
-      const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
-      void fetch(`${base}/api/modify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ positionId: id, stopLoss, takeProfit }),
-      }).then(() => refreshMt5Now());
-    }
-    setPositions((prev) =>
-      prev.map((pos) => (pos.id === id ? { ...pos, stopLoss, takeProfit } : pos))
-    );
+    void modifyVerifiedTargets(id, stopLoss, takeProfit, { source: 'OWNER' });
   };
+
+  // Fresh reactive inputs ref for the continuous 24/7 autonomous analysis & execution cycle
+  const latestEngineInputsRef = useRef({
+    pairs,
+    positions,
+    activePair,
+    activeTimeframe,
+    liveCandles,
+    chartBrainAnalysis,
+    mtfCandlesByTf,
+    metrics,
+    riskGuard,
+    learningSummary,
+    mt5Connected,
+    mt5Account,
+    systemStatus,
+  });
+  latestEngineInputsRef.current = {
+    pairs,
+    positions,
+    activePair,
+    activeTimeframe,
+    liveCandles,
+    chartBrainAnalysis,
+    mtfCandlesByTf,
+    metrics,
+    riskGuard,
+    learningSummary,
+    mt5Connected,
+    mt5Account,
+    systemStatus,
+  };
+
+  const runAutonomousCycle = useCallback(
+    async (forceLlm: boolean) => {
+      if (!authSession || engineRunningRef.current) return;
+      engineRunningRef.current = true;
+      if (forceLlm) setAiEngineBusy(true);
+
+      try {
+        const snap = latestEngineInputsRef.current;
+        const openPosList = snap.positions.filter((p) => p.status === 'OPEN');
+
+        // 1. Run real deterministic multi-instrument analysis across ALL pairs
+        const reports = snap.pairs.map((pair) => {
+          const isSelected = pair.symbol === snap.activePair.symbol;
+          const candles =
+            isSelected && snap.liveCandles.length >= 30
+              ? snap.liveCandles
+              : generateMt5Candles(pair.symbol, pair.price, snap.activeTimeframe, 160);
+          const brainAnalysis =
+            isSelected &&
+            snap.chartBrainAnalysis &&
+            snap.chartBrainAnalysis.snapshot.symbol === pair.symbol &&
+            snap.chartBrainAnalysis.snapshot.timeframe === snap.activeTimeframe
+              ? snap.chartBrainAnalysis
+              : analyzeStrategyBrain(candles, pair.symbol, snap.activeTimeframe);
+
+          const decision = runIntelligentDecision({
+            pair,
+            timeframe: snap.activeTimeframe,
+            candles,
+            brainAnalysis,
+            candlesByTf: isSelected ? snap.mtfCandlesByTf : undefined,
+            equity: snap.metrics.totalEquity,
+            riskGuard: snap.riskGuard,
+            openPositionsCount: openPosList.length,
+            realizedTodayUsd: snap.metrics.realizedToday,
+            calibratedSampleCount: snap.learningSummary.resolvedCount,
+            calibratedWinRatePct: snap.learningSummary.overallWinRatePct,
+          });
+
+          const latestCandlePat =
+            brainAnalysis.snapshot.candlestickReport?.latestConfirmedPattern?.patternName ??
+            brainAnalysis.snapshot.candlestickReport?.latestActivePattern?.patternName ??
+            'Standart sham';
+
+          return {
+            symbol: pair.symbol,
+            timeframe: snap.activeTimeframe,
+            price: pair.price,
+            spreadPoints: decision.riskEvaluation.spreadPoints,
+            assetClass: pair.assetClass,
+            action: decision.finalAction,
+            analyticalScore: decision.analyticalScore,
+            regime: decision.regime.regime,
+            regimeLabelUz: decision.regime.labelUz,
+            mtfAlignmentPct: decision.mtf.alignmentPct,
+            mtfConflict: decision.mtf.conflictDetected,
+            entryPrice: pair.price,
+            stopLoss: decision.riskEvaluation.dynamicStopLoss,
+            takeProfit: decision.riskEvaluation.takeProfit,
+            recommendedLot: decision.riskEvaluation.recommendedLot,
+            riskPct: decision.riskEvaluation.riskPct,
+            riskAllowed: decision.riskEvaluation.overallAllowed,
+            riskBlockReasons: decision.riskEvaluation.blockReasons,
+            explanationUz: decision.explanationUz,
+            strategyVotes: decision.strategyDecisions.map((sd) => ({
+              strategyId: sd.strategyId,
+              strategyName: sd.strategyName,
+              signal: sd.signal,
+              selectedForRegime: sd.selectedForRegime,
+              reasonUz: sd.reasonUz,
+            })),
+            smcSummary: brainAnalysis.snapshot.smcDeep?.summaryUz,
+            candlestickSummary: latestCandlePat,
+            atr14: decision.riskEvaluation.atr14,
+          };
+        });
+
+        const openPositionsPayload = openPosList.map((pos) => {
+          const diff =
+            pos.side === 'LONG'
+              ? (pos.markPrice - pos.entryPrice) / Math.max(1e-9, pos.entryPrice)
+              : (pos.entryPrice - pos.markPrice) / Math.max(1e-9, pos.entryPrice);
+          return {
+            id: pos.id,
+            symbol: pos.symbol,
+            side: pos.side,
+            entryPrice: pos.entryPrice,
+            markPrice: pos.markPrice,
+            lotSize: pos.lotSize,
+            sizeUsdt: pos.sizeUsdt,
+            stopLoss: pos.stopLoss,
+            takeProfit: pos.takeProfit,
+            profit: Number((pos.sizeUsdt * diff).toFixed(2)),
+            strategyName: pos.strategyName,
+            openedAt: pos.openedAt,
+          };
+        });
+
+        const accountPayload = {
+          mt5Connected: snap.mt5Connected,
+          tradeMode: snap.mt5Connected ? (snap.mt5Account?.tradeMode ?? 'DEMO') : ('SIMULATED' as const),
+          tradeAllowed: snap.mt5Connected ? (snap.mt5Account?.tradeAllowed ?? true) : true,
+          investorReadOnly: snap.mt5Connected ? Boolean(snap.mt5Account?.investorReadOnly) : false,
+          equity: snap.metrics.totalEquity,
+          marginFree: snap.metrics.availableBalance,
+          realizedToday: snap.metrics.realizedToday,
+          dailyMaxLossUsd: snap.riskGuard.dailyMaxLossUsdt,
+        };
+
+        // 2. Sync multi-instrument analysis & get backend diagnostics, order commands, and deterministic SL/TP actions
+        const cycleRes = await apiJson<{
+          ok: boolean;
+          diagnostics: DiagnosticBlocker[];
+          approvedOrderCommands: {
+            signalHash: string;
+            symbol: string;
+            side: 'LONG' | 'SHORT';
+            lotSize: number;
+            entryPrice: number;
+            stopLoss: number;
+            takeProfit: number;
+            riskPct: number;
+            riskRewardRatio: number;
+            analyticalScore: number;
+            strategySummary: string;
+            reasonUz: string;
+          }[];
+          deterministicPositionActions: {
+            positionId: string;
+            symbol: string;
+            action: 'MOVE_BREAKEVEN' | 'TRAIL_PROFIT' | 'MODIFY_SL_TP' | 'CLOSE_PROFIT' | 'CLOSE_LOSS_CUT';
+            newStopLoss: number | null;
+            newTakeProfit: number | null;
+            reasonUz: string;
+            source: 'AI_LLM' | 'ENSEMBLE_ENGINE';
+          }[];
+          highConvictionCandidates: InstrumentAnalysisSnapshot[];
+          canAutoExecute: boolean;
+          engineMetrics: EngineMetricsRecord;
+          perSymbolReports: Record<string, InstrumentAnalysisSnapshot>;
+          control: ControlStateRecord;
+        }>('/api/engine/cycle', {
+          method: 'POST',
+          body: JSON.stringify({
+            reports,
+            openPositions: openPositionsPayload,
+            account: accountPayload,
+          }),
+        });
+
+        setSystemStatus((prev) =>
+          prev
+            ? {
+                ...prev,
+                control: cycleRes.control,
+                engineMetrics: cycleRes.engineMetrics,
+                diagnostics: cycleRes.diagnostics,
+                perSymbolReports: cycleRes.perSymbolReports,
+              }
+            : prev
+        );
+
+        let mutatedTrades = false;
+
+        // 3. Apply deterministic Break-Even / Trailing Stop / Missing SL-TP protection when AUTONOMOUS + aiAutoSlTpEnabled
+        if (
+          cycleRes.control.autonomousMode === 'AUTONOMOUS' &&
+          cycleRes.control.aiAutoSlTpEnabled &&
+          cycleRes.deterministicPositionActions.length > 0
+        ) {
+          for (const act of cycleRes.deterministicPositionActions) {
+            const mappedType =
+              act.action === 'MOVE_BREAKEVEN'
+                ? 'BREAK_EVEN'
+                : act.action === 'TRAIL_PROFIT'
+                  ? 'TRAILING_STOP'
+                  : 'SL_TP_MODIFIED';
+            const res = await modifyVerifiedTargets(act.positionId, act.newStopLoss, act.newTakeProfit, {
+              type: mappedType,
+              source: 'ENSEMBLE_ENGINE',
+              reasonUz: act.reasonUz,
+            });
+            if (res.ok) mutatedTrades = true;
+          }
+        }
+
+        // 4. Throttled AI LLM Deep Evaluator (combines Strategy Ensemble + AI own reasoning for entries & dynamic P/L SL/TP)
+        const shouldCallLlm =
+          forceLlm ||
+          (cycleRes.control.autonomousMode === 'AUTONOMOUS' &&
+            (cycleRes.highConvictionCandidates.length > 0 || openPositionsPayload.length > 0) &&
+            Date.now() - lastLlmRunRef.current >= 28000);
+
+        let llmEntryMap = new Map<
+          string,
+          {
+            decision: 'EXECUTE_BUY' | 'EXECUTE_SELL' | 'WAIT' | 'REJECT';
+            confidencePct: number;
+            refinedEntry: number;
+            refinedStopLoss: number;
+            refinedTakeProfit: number;
+            reasoningUz: string;
+          }
+        >();
+        let llmPositionActions: {
+          positionId: string;
+          symbol: string;
+          action: 'HOLD' | 'MOVE_BREAKEVEN' | 'MODIFY_SL_TP' | 'TRAIL_PROFIT' | 'CLOSE_PROFIT' | 'CLOSE_LOSS_CUT';
+          newStopLoss: number | null;
+          newTakeProfit: number | null;
+          reasoningUz: string;
+        }[] = [];
+
+        if (shouldCallLlm) {
+          const candidatesForLlm =
+            cycleRes.highConvictionCandidates.length > 0
+              ? cycleRes.highConvictionCandidates
+              : forceLlm
+                ? Object.values(cycleRes.perSymbolReports)
+                    .sort((a, b) => b.analyticalScore - a.analyticalScore)
+                    .slice(0, 3)
+                : [];
+
+          if (candidatesForLlm.length > 0 || openPositionsPayload.length > 0) {
+            try {
+              lastLlmRunRef.current = Date.now();
+              const llmRes = await apiJson<{
+                ok: boolean;
+                llmUsed: boolean;
+                provider: string;
+                overallBriefUz: string;
+                entryDecisions: {
+                  symbol: string;
+                  decision: 'EXECUTE_BUY' | 'EXECUTE_SELL' | 'WAIT' | 'REJECT';
+                  confidencePct: number;
+                  refinedEntry: number;
+                  refinedStopLoss: number;
+                  refinedTakeProfit: number;
+                  reasoningUz: string;
+                }[];
+                positionActions: {
+                  positionId: string;
+                  symbol: string;
+                  action:
+                    | 'HOLD'
+                    | 'MOVE_BREAKEVEN'
+                    | 'MODIFY_SL_TP'
+                    | 'TRAIL_PROFIT'
+                    | 'CLOSE_PROFIT'
+                    | 'CLOSE_LOSS_CUT';
+                  newStopLoss: number | null;
+                  newTakeProfit: number | null;
+                  reasoningUz: string;
+                }[];
+              }>('/api/ai/autonomous-decide', {
+                method: 'POST',
+                body: JSON.stringify({
+                  candidates: candidatesForLlm,
+                  openPositions: openPositionsPayload,
+                  account: accountPayload,
+                  marketSummaries: reports.map((r) => ({
+                    symbol: r.symbol,
+                    price: r.price,
+                    action: r.action,
+                    score: r.analyticalScore,
+                    regime: r.regime,
+                    mtfAlignmentPct: r.mtfAlignmentPct,
+                    smc: r.smcSummary,
+                    candle: r.candlestickSummary,
+                  })),
+                }),
+              });
+
+              setLastAiBriefUz(llmRes.overallBriefUz);
+              setLastAiProvider(llmRes.provider);
+              setLastAiError(null);
+
+              llmEntryMap = new Map(
+                (llmRes.entryDecisions ?? []).map((ed) => [String(ed.symbol || '').toUpperCase(), ed])
+              );
+              llmPositionActions = llmRes.positionActions ?? [];
+            } catch (err) {
+              const errMsg = err instanceof Error ? err.message : 'AI LLM tahlilida xatolik yuz berdi.';
+              setLastAiError(errMsg);
+            }
+          }
+        }
+
+        // 5. Execute Approved Parallel Multi-Orders when AUTONOMOUS gates pass
+        if (cycleRes.canAutoExecute && cycleRes.approvedOrderCommands.length > 0) {
+          for (const cmd of cycleRes.approvedOrderCommands) {
+            const llmDecision = llmEntryMap.get(cmd.symbol.toUpperCase());
+            if (llmDecision && (llmDecision.decision === 'REJECT' || llmDecision.decision === 'WAIT')) {
+              await recordEngineExecution({
+                type: 'ORDER_REJECTED',
+                symbol: cmd.symbol,
+                side: cmd.side,
+                lotSize: cmd.lotSize,
+                entryPrice: cmd.entryPrice,
+                stopLoss: cmd.stopLoss,
+                takeProfit: cmd.takeProfit,
+                source: 'AI_LLM',
+                reasonUz: `AI LLM chuqur tahlili kirishni rad etdi (${llmDecision.decision}): ${llmDecision.reasoningUz}`,
+                brokerMessage: 'AI_LLM_VETO',
+              });
+              continue;
+            }
+
+            let finalSl = cmd.stopLoss;
+            let finalTp = cmd.takeProfit;
+            let execSource: 'AI_LLM' | 'ENSEMBLE_ENGINE' = 'ENSEMBLE_ENGINE';
+            let execReason = cmd.reasonUz;
+
+            if (
+              llmDecision &&
+              ((cmd.side === 'LONG' && llmDecision.decision === 'EXECUTE_BUY') ||
+                (cmd.side === 'SHORT' && llmDecision.decision === 'EXECUTE_SELL'))
+            ) {
+              execSource = 'AI_LLM';
+              execReason = `AI + Ensemble (${llmDecision.confidencePct}%): ${llmDecision.reasoningUz}`;
+              if (
+                cmd.side === 'LONG' &&
+                llmDecision.refinedStopLoss > 0 &&
+                llmDecision.refinedStopLoss < cmd.entryPrice &&
+                llmDecision.refinedTakeProfit > cmd.entryPrice
+              ) {
+                finalSl = llmDecision.refinedStopLoss;
+                finalTp = llmDecision.refinedTakeProfit;
+              } else if (
+                cmd.side === 'SHORT' &&
+                llmDecision.refinedStopLoss > cmd.entryPrice &&
+                llmDecision.refinedTakeProfit > 0 &&
+                llmDecision.refinedTakeProfit < cmd.entryPrice
+              ) {
+                finalSl = llmDecision.refinedStopLoss;
+                finalTp = llmDecision.refinedTakeProfit;
+              }
+            }
+
+            const matchedPair = snap.pairs.find((p) => p.symbol === cmd.symbol);
+            const execRes = await executeVerifiedOrder(
+              {
+                symbol: cmd.symbol,
+                side: cmd.side,
+                orderType: 'MARKET',
+                entryPrice: matchedPair?.price ?? cmd.entryPrice,
+                markPrice: matchedPair?.price ?? cmd.entryPrice,
+                lotSize: cmd.lotSize,
+                sizeUsdt: Math.max(100, Math.round(cmd.lotSize * 10000)),
+                leverage: 100,
+                stopLoss: finalSl,
+                takeProfit: finalTp,
+                status: 'OPEN',
+                strategyName: `Avto-AI · ${cmd.strategySummary.slice(0, 42)}`,
+              },
+              {
+                source: execSource,
+                signalHash: cmd.signalHash,
+                reasonUz: execReason,
+              }
+            );
+            if (execRes.ok) mutatedTrades = true;
+          }
+        }
+
+        // 6. Execute AI LLM Dynamic Profit/Loss Position Management (SL/TP, Break-Even, Trailing, Close)
+        if (
+          cycleRes.control.autonomousMode === 'AUTONOMOUS' &&
+          cycleRes.control.aiAutoSlTpEnabled &&
+          llmPositionActions.length > 0
+        ) {
+          for (const pa of llmPositionActions) {
+            if (!pa || pa.action === 'HOLD') continue;
+            const pos =
+              openPosList.find((p) => p.id === pa.positionId) ??
+              openPosList.find((p) => p.symbol.toUpperCase() === String(pa.symbol || '').toUpperCase());
+            if (!pos) continue;
+
+            if (pa.action === 'CLOSE_PROFIT' || pa.action === 'CLOSE_LOSS_CUT') {
+              const closeRes = await closeVerifiedPosition(pos.id, {
+                source: 'AI_LLM',
+                reasonUz: `AI (${pa.action}): ${pa.reasoningUz}`,
+              });
+              if (closeRes.ok) mutatedTrades = true;
+              continue;
+            }
+
+            // Strictly prevent widening Stop-Loss into deeper loss
+            let nextSl = pa.newStopLoss !== null && pa.newStopLoss > 0 ? pa.newStopLoss : pos.stopLoss;
+            const nextTp = pa.newTakeProfit !== null && pa.newTakeProfit > 0 ? pa.newTakeProfit : pos.takeProfit;
+
+            if (pos.stopLoss !== null && nextSl !== null) {
+              if (pos.side === 'LONG' && nextSl < pos.stopLoss) {
+                nextSl = pos.stopLoss;
+              } else if (pos.side === 'SHORT' && nextSl > pos.stopLoss) {
+                nextSl = pos.stopLoss;
+              }
+            }
+
+            const mappedType =
+              pa.action === 'MOVE_BREAKEVEN'
+                ? 'BREAK_EVEN'
+                : pa.action === 'TRAIL_PROFIT'
+                  ? 'TRAILING_STOP'
+                  : 'SL_TP_MODIFIED';
+
+            const modRes = await modifyVerifiedTargets(pos.id, nextSl, nextTp, {
+              type: mappedType,
+              source: 'AI_LLM',
+              reasonUz: `AI (${pa.action}): ${pa.reasoningUz}`,
+            });
+            if (modRes.ok) mutatedTrades = true;
+          }
+        }
+
+        if (mutatedTrades || forceLlm) {
+          void refreshBackendState();
+        }
+      } catch (err) {
+        if (forceLlm) {
+          setLastAiError(err instanceof Error ? err.message : 'Avtonom siklda xatolik yuz berdi.');
+        }
+      } finally {
+        engineRunningRef.current = false;
+        if (forceLlm) setAiEngineBusy(false);
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [authSession, refreshBackendState]
+  );
+
+  // Continuous 24/7 multi-instrument analysis & autonomous execution loop (runs every 12s when scanner RUNNING)
+  const scannerRunning = (systemStatus?.control.scannerStatus ?? 'RUNNING') === 'RUNNING';
+  useEffect(() => {
+    if (!authSession || !scannerRunning) return;
+    const initialTimer = window.setTimeout(() => {
+      void runAutonomousCycle(false);
+    }, 1200);
+    const interval = window.setInterval(() => {
+      void runAutonomousCycle(false);
+    }, 12000);
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(interval);
+    };
+  }, [authSession, scannerRunning, runAutonomousCycle]);
 
   const handleKillAllPositions = () => {
     void pushSystemEvent(
@@ -1441,7 +2239,7 @@ export default function App() {
                 <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
                   <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Ochiq orderlar</div>
                   <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                    {metrics.openCount} / {riskGuard.maxOpenPositions}
+                    {metrics.openCount} / {systemStatus?.control.maxOpenOrders ?? riskGuard.maxOpenPositions}
                   </div>
                   <button
                     type="button"
@@ -1488,10 +2286,10 @@ export default function App() {
                         : 'text-rose-500'
                     }`}
                   >
-                    {decisionReport.riskEvaluation.riskPct.toFixed(2)}%
+                    {(systemStatus?.engineMetrics?.currentPortfolioRiskPct ?? decisionReport.riskEvaluation.riskPct).toFixed(2)}%
                   </div>
                   <div className="text-[10px] font-mono text-slate-500 truncate">
-                    ${decisionReport.riskEvaluation.riskAmountUsd.toFixed(0)} / limit -${riskGuard.dailyMaxLossUsdt}
+                    Limit: {systemStatus?.control.maxPortfolioRiskPct ?? 5}% · -${riskGuard.dailyMaxLossUsdt}
                   </div>
                 </div>
               </section>
@@ -1550,6 +2348,19 @@ export default function App() {
                   />
                 </div>
               </div>
+
+              {/* LIVE AI ANALYSIS, EXECUTION METRICS & DIAGNOSTICS STRIP */}
+              <AutonomousDiagnosticsPanel
+                status={systemStatus}
+                aiBusy={aiEngineBusy}
+                lastAiBriefUz={lastAiBriefUz}
+                lastAiProvider={lastAiProvider}
+                lastAiError={lastAiError}
+                onRunFullAiCycle={() => void runAutonomousCycle(true)}
+                onSelectSymbol={setSelectedSymbol}
+                onNavigate={setActiveView}
+                compact
+              />
 
               {/* BOTTOM: 7 Institutional Command Modules */}
               <DashboardBottomGrid
@@ -1735,12 +2546,24 @@ export default function App() {
           {activeView === 'autotrading' && (
             <AutoTradingView
               control={systemStatus?.control ?? null}
+              systemStatus={systemStatus}
               registry={strategyRegistry}
               ownerVerified={authSession.ownerVerified}
               mt5Connected={mt5Connected}
+              mt5AccountMode={mt5Connected ? (mt5Account?.tradeMode ?? 'DEMO') : 'SIMULATED'}
+              aiBusy={aiEngineBusy}
+              lastAiBriefUz={lastAiBriefUz}
+              lastAiProvider={lastAiProvider}
+              lastAiError={lastAiError}
+              onRunFullAiCycle={() => void runAutonomousCycle(true)}
+              onSelectSymbol={(sym) => {
+                setSelectedSymbol(sym);
+                setActiveView('dashboard');
+              }}
               onControlUpdated={() => void refreshBackendState()}
               onGoToOwnerCenter={() => setActiveView('owner')}
               onGoToStrategies={() => setActiveView('strategies')}
+              onNavigate={setActiveView}
             />
           )}
 

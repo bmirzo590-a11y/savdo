@@ -41,6 +41,14 @@ import {
   restoreBackup,
   saveMemoryDb,
 } from './server/localMemory';
+import {
+  IncomingAccountState,
+  IncomingInstrumentReport,
+  IncomingOpenPosition,
+  appendExecutionLog,
+  runAutonomousEngineCycle,
+  runDemoMultiOrderVerificationSuite,
+} from './server/autonomousEngine';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -593,6 +601,10 @@ async function startServer() {
         active: activeStrategies,
         pending: pendingStrategies,
       },
+      engineMetrics: db.engineMetrics,
+      diagnostics: db.diagnostics,
+      perSymbolReports: db.perSymbolReports,
+      executionLogs: db.executionLogs.slice(0, 60),
       memory: {
         usedMb: sys.usedMemMb,
         totalMb: sys.totalMemMb,
@@ -825,6 +837,408 @@ async function startServer() {
       message: `Owner tasdig‘i: ${target.ownerApproved ? 'Tasdiqlangan' : 'Kutilmoqda'} · Holat: ${target.active ? 'Faol' : 'Nofaol'}.`,
     });
     return res.json({ ok: true, strategy: target, strategies: db.strategies });
+  });
+
+  app.post('/api/registry/strategies/approve-ready', requireAuth, requireCsrf, requireOwner, (_req, res) => {
+    const db = loadMemoryDb();
+    let approvedCount = 0;
+    const now = new Date().toISOString();
+    for (const s of db.strategies) {
+      if (s.codeReviewStatus === 'PASSED' && s.backtestStatus === 'PASSED' && s.demoTestStatus === 'PASSED') {
+        if (!s.ownerApproved || !s.active) {
+          s.ownerApproved = true;
+          s.ownerApprovedAt = s.ownerApprovedAt ?? now;
+          s.active = true;
+          approvedCount++;
+        }
+      }
+    }
+    saveMemoryDb(db);
+    if (approvedCount > 0) {
+      pushNotification({
+        priority: 'HIGH',
+        category: 'STRATEGY',
+        title: `${approvedCount} ta tayyor strategiya Owner tomonidan tasdiqlandi`,
+        message: 'Code Review, Backtest va Demo sinovdan o‘tgan strategiyalar avtonom ensemblega qo‘shildi.',
+      });
+    }
+    return res.json({ ok: true, approvedCount, strategies: db.strategies });
+  });
+
+  /* ==================== AUTONOMOUS ENGINE, MULTI-ORDER & AI DYNAMIC SL/TP ==================== */
+  app.post('/api/engine/settings', requireAuth, requireCsrf, requireOwner, (req, res) => {
+    const body = req.body as {
+      maxOpenOrders?: number;
+      maxPortfolioRiskPct?: number;
+      aiAutoSlTpEnabled?: boolean;
+      allowRealAccountTrading?: boolean;
+    };
+    const db = loadMemoryDb();
+    if (body.maxOpenOrders !== undefined) {
+      const n = Math.round(Number(body.maxOpenOrders));
+      if (!Number.isFinite(n) || n < 1 || n > 100) {
+        return res.status(400).json({ error: 'Maksimal ochiq orderlar soni 1 dan 100 gacha bo‘lishi kerak.' });
+      }
+      db.control.maxOpenOrders = n;
+    }
+    if (body.maxPortfolioRiskPct !== undefined) {
+      const r = Number(body.maxPortfolioRiskPct);
+      if (!Number.isFinite(r) || r < 0.5 || r > 25) {
+        return res.status(400).json({ error: 'Portfolio risk limiti 0.5% dan 25% gacha bo‘lishi kerak.' });
+      }
+      db.control.maxPortfolioRiskPct = Number(r.toFixed(2));
+    }
+    if (body.aiAutoSlTpEnabled !== undefined) {
+      db.control.aiAutoSlTpEnabled = Boolean(body.aiAutoSlTpEnabled);
+    }
+    if (body.allowRealAccountTrading !== undefined) {
+      db.control.allowRealAccountTrading = Boolean(body.allowRealAccountTrading);
+    }
+    saveMemoryDb(db);
+    pushNotification({
+      priority: 'HIGH',
+      category: 'RISK',
+      title: 'Avtonom Engine va Multi-Order sozlamalari yangilandi',
+      message: `Max order: ${db.control.maxOpenOrders} · Portfolio risk: ${db.control.maxPortfolioRiskPct}% · AI Avto SL/TP: ${db.control.aiAutoSlTpEnabled ? 'FAOL' : 'O‘CHIQ'} · Real ruxsat: ${db.control.allowRealAccountTrading ? 'HA' : 'YO‘Q'}.`,
+    });
+    return res.json({ ok: true, control: db.control });
+  });
+
+  app.post('/api/engine/cycle', requireAuth, requireCsrf, (req, res) => {
+    try {
+      const body = req.body as {
+        reports?: IncomingInstrumentReport[];
+        openPositions?: IncomingOpenPosition[];
+        account?: IncomingAccountState;
+      };
+      const reports = Array.isArray(body.reports) ? body.reports.slice(0, 50) : [];
+      const openPositions = Array.isArray(body.openPositions) ? body.openPositions.slice(0, 120) : [];
+      const account: IncomingAccountState = {
+        mt5Connected: Boolean(body.account?.mt5Connected),
+        tradeMode: body.account?.tradeMode ?? (body.account?.mt5Connected ? 'DEMO' : 'SIMULATED'),
+        tradeAllowed: body.account?.tradeAllowed,
+        investorReadOnly: Boolean(body.account?.investorReadOnly),
+        equity: Number(body.account?.equity) || 0,
+        marginFree: Number(body.account?.marginFree) || 0,
+        realizedToday: Number(body.account?.realizedToday) || 0,
+        dailyMaxLossUsd: Number(body.account?.dailyMaxLossUsd) || 750,
+      };
+
+      const db = loadMemoryDb();
+      const localCfg = getLocalProxyConfig();
+      const aiApiReady = localCfg.enabled || Boolean(process.env.GEMINI_API_KEY);
+
+      const cycle = runAutonomousEngineCycle({
+        db,
+        reports,
+        openPositions,
+        account,
+        aiApiReady,
+      });
+
+      saveMemoryDb(db);
+
+      return res.json({
+        ok: true,
+        ...cycle,
+        engineMetrics: db.engineMetrics,
+        perSymbolReports: db.perSymbolReports,
+        control: db.control,
+      });
+    } catch (error) {
+      console.error('Engine Cycle Error:', error);
+      const db = loadMemoryDb();
+      db.engineMetrics.aiAnalysisState = 'ERROR';
+      db.engineMetrics.aiAnalysisError = error instanceof Error ? error.message : 'Engine sikl xatosi';
+      saveMemoryDb(db);
+      return res.status(500).json({ error: db.engineMetrics.aiAnalysisError });
+    }
+  });
+
+  app.post('/api/engine/record-execution', requireAuth, requireCsrf, (req, res) => {
+    const body = req.body as {
+      type?: 'ORDER_SENT' | 'ORDER_REJECTED' | 'SL_TP_MODIFIED' | 'BREAK_EVEN' | 'TRAILING_STOP' | 'AI_CLOSED';
+      symbol?: string;
+      side?: 'LONG' | 'SHORT';
+      positionId?: string;
+      lotSize?: number;
+      entryPrice?: number;
+      stopLoss?: number | null;
+      takeProfit?: number | null;
+      pnlUsd?: number;
+      signalHash?: string;
+      source?: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER';
+      accountMode?: 'MT5_DEMO' | 'MT5_REAL' | 'SIMULATED_DEMO';
+      reasonUz?: string;
+      brokerMessage?: string;
+    };
+
+    const validTypes = [
+      'ORDER_SENT',
+      'ORDER_REJECTED',
+      'SL_TP_MODIFIED',
+      'BREAK_EVEN',
+      'TRAILING_STOP',
+      'AI_CLOSED',
+    ] as const;
+    if (!body.type || !validTypes.includes(body.type)) {
+      return res.status(400).json({ error: 'Noto‘g‘ri ijro turi.' });
+    }
+
+    const db = loadMemoryDb();
+    const nowIso = new Date().toISOString();
+    const symbol = String(body.symbol || 'UNKNOWN').slice(0, 24);
+    const reasonUz = String(body.reasonUz || '').slice(0, 350);
+    const brokerMessage = body.brokerMessage ? String(body.brokerMessage).slice(0, 260) : undefined;
+
+    if (body.type === 'ORDER_SENT') {
+      db.engineMetrics.ordersSent += 1;
+      db.engineMetrics.lastSuccessfulExecution = nowIso;
+      if (body.signalHash) {
+        db.executedSignalHashes.unshift({
+          hash: String(body.signalHash).slice(0, 32),
+          symbol,
+          direction: body.side === 'SHORT' ? 'SELL' : 'BUY',
+          timestamp: nowIso,
+          expiresAt: Date.now() + 20 * 60 * 1000,
+        });
+        db.executedSignalHashes = db.executedSignalHashes.slice(0, 300);
+      }
+    } else if (body.type === 'ORDER_REJECTED') {
+      db.engineMetrics.ordersRejected += 1;
+      db.engineMetrics.lastRejectionReason = brokerMessage || reasonUz || 'Broker buyurtmani rad etdi';
+    } else if (
+      body.type === 'SL_TP_MODIFIED' ||
+      body.type === 'BREAK_EVEN' ||
+      body.type === 'TRAILING_STOP'
+    ) {
+      db.engineMetrics.aiSlTpModifications += 1;
+      db.engineMetrics.lastSuccessfulExecution = nowIso;
+    } else if (body.type === 'AI_CLOSED') {
+      db.engineMetrics.aiClosedPositions += 1;
+      db.engineMetrics.lastSuccessfulExecution = nowIso;
+    }
+
+    const entry = appendExecutionLog(db, {
+      type: body.type,
+      symbol,
+      side: body.side,
+      positionId: body.positionId ? String(body.positionId).slice(0, 40) : undefined,
+      lotSize: typeof body.lotSize === 'number' ? body.lotSize : undefined,
+      entryPrice: typeof body.entryPrice === 'number' ? body.entryPrice : undefined,
+      stopLoss: body.stopLoss ?? null,
+      takeProfit: body.takeProfit ?? null,
+      pnlUsd: typeof body.pnlUsd === 'number' ? body.pnlUsd : undefined,
+      source: body.source ?? 'ENSEMBLE_ENGINE',
+      accountMode: body.accountMode ?? 'SIMULATED_DEMO',
+      reasonUz,
+      brokerMessage,
+    });
+
+    saveMemoryDb(db);
+    return res.json({
+      ok: true,
+      entry,
+      engineMetrics: db.engineMetrics,
+      executionLogs: db.executionLogs.slice(0, 60),
+    });
+  });
+
+  app.post('/api/engine/demo-stress-test', requireAuth, requireCsrf, (_req, res) => {
+    const db = loadMemoryDb();
+    const result = runDemoMultiOrderVerificationSuite(db);
+    saveMemoryDb(db);
+    return res.json({
+      ok: true,
+      result,
+      executionLogs: db.executionLogs.slice(0, 60),
+    });
+  });
+
+  // Autonomous AI LLM Deep Market Evaluator + Dynamic Profit/Loss SL/TP & Exit Manager
+  app.post('/api/ai/autonomous-decide', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const body = req.body as {
+        candidates?: unknown[];
+        openPositions?: IncomingOpenPosition[];
+        account?: IncomingAccountState;
+        marketSummaries?: unknown[];
+      };
+
+      const candidates = Array.isArray(body.candidates) ? body.candidates.slice(0, 6) : [];
+      const openPositions = Array.isArray(body.openPositions) ? body.openPositions.slice(0, 40) : [];
+      const marketSummaries = Array.isArray(body.marketSummaries) ? body.marketSummaries.slice(0, 12) : [];
+
+      if (candidates.length === 0 && openPositions.length === 0) {
+        return res.json({
+          ok: true,
+          llmUsed: false,
+          provider: 'none',
+          overallBriefUz: 'Hozircha LLM chuqur baholashi uchun yuqori ehtimolli setup yoki ochiq pozitsiya yo‘q.',
+          entryDecisions: [],
+          positionActions: [],
+        });
+      }
+
+      const db = loadMemoryDb();
+      const localCfg = getLocalProxyConfig();
+      const hasGemini = Boolean(process.env.GEMINI_API_KEY);
+
+      if (!localCfg.enabled && !hasGemini) {
+        return res.status(503).json({
+          error:
+            'AI API kaliti topilmadi (GEMINI_API_KEY yoki LOCAL_LLM_API_KEY sozlanmagan). Deterministik himoya ishlayapti, lekin chuqur LLM tahlili uchun API kalit kerak.',
+          llmUsed: false,
+        });
+      }
+
+      const sysInst = `Siz "Trade Killer AI" — mustaqil, kuchli institutional AI Trading Head va Risk Manager siz.
+VAZIFANGIZ:
+1. Strategiyalar (SMC BOS/CHoCH/FVG/OB/Sweep, EMA Ribbon, RSI/Divergence, PAC34, VWAP, Supertrend, Ichimoku, Candlestick, MTF W1..M1) bergan hisob-kitoblarni HAMDA o'zingizning chuqur bozor mantiqingizni birgalikda ishga soling!
+2. Yangi kirishlar (candidates) bo'yicha: faqat haqiqiy, MTF uyg'un, risk/mukofot >= 1.6 bo'lgan kuchli setup'larga EXECUTE_BUY yoki EXECUTE_SELL bering; aks holda WAIT yoki REJECT qiling va SL/TP ni strukturaviy darajalarga aniq moslang.
+3. Ochiq pozitsiyalar (openPositions) bo'yicha — FOYDA VA ZARARGA QARAB TO'LIQ AVTOMATIK BOSHQARUV:
+   - Agar pozitsiya yaxshi foydada bo'lsa va trend davom etsa: SL ni Break-Even ga yoki Trailing Stop ga ko'taring (MOVE_BREAKEVEN / TRAIL_PROFIT) va kerak bo'lsa TP ni kengaytiring (MODIFY_SL_TP).
+   - Agar pozitsiya foydada bo'lib, qarshi SMC BOS/CHoCH, kuchli qarshi sham patterni yoki RSI divergensiya paydo bo'lsa: foydani saqlash uchun CLOSE_PROFIT yoki qattiq Trailing SL qo'ying.
+   - Agar pozitsiya zararda bo'lib, bozor strukturasi butunlay buzilgan bo'lsa (invalidation): katta zararga tushmaslik uchun SL ni toraytiring (MODIFY_SL_TP) yoki CLOSE_LOSS_CUT buyrug'ini bering.
+   - Agar pozitsiya normal harakatlanayotgan va SL/TP joyida bo'lsa: HOLD bering.
+   - HECH QACHON SL ni zararni kattalashtiradigan tomonga uzoqlashtirmang! BUY da newStopLoss < currentPrice < newTakeProfit, SELL da newTakeProfit < currentPrice < newStopLoss mantiqiga qat'iy rioya qiling.
+${STRATEGY_BRAIN_PROMPT}`;
+
+      const userPrompt = `Quyidagi real bozor ma'lumotlari, strategiya ansambli va ochiq pozitsiyalar bo'yicha chuqur AI qarorini sof JSON formatida qaytaring:
+${JSON.stringify(
+  {
+    account: body.account ?? {},
+    control: {
+      autonomousMode: db.control.autonomousMode,
+      maxOpenOrders: db.control.maxOpenOrders,
+      maxPortfolioRiskPct: db.control.maxPortfolioRiskPct,
+      aiAutoSlTpEnabled: db.control.aiAutoSlTpEnabled,
+    },
+    highConvictionCandidates: candidates,
+    openPositions,
+    marketContext: marketSummaries,
+  },
+  null,
+  2
+)}`;
+
+      let parsed: {
+        overallBriefUz?: string;
+        entryDecisions?: {
+          symbol: string;
+          decision: 'EXECUTE_BUY' | 'EXECUTE_SELL' | 'WAIT' | 'REJECT';
+          confidencePct: number;
+          refinedEntry: number;
+          refinedStopLoss: number;
+          refinedTakeProfit: number;
+          reasoningUz: string;
+        }[];
+        positionActions?: {
+          positionId: string;
+          symbol: string;
+          action: 'HOLD' | 'MOVE_BREAKEVEN' | 'MODIFY_SL_TP' | 'TRAIL_PROFIT' | 'CLOSE_PROFIT' | 'CLOSE_LOSS_CUT';
+          newStopLoss: number | null;
+          newTakeProfit: number | null;
+          reasoningUz: string;
+        }[];
+      } = {};
+
+      let providerUsed = 'gemini-4-hydrogen';
+
+      if (localCfg.enabled) {
+        providerUsed = `local-proxy (${localCfg.baseUrl})`;
+        parsed = await callOpenAiCompatibleJson(
+          `${sysInst}\nJSON maydonlari: overallBriefUz (string), entryDecisions: [{symbol, decision (EXECUTE_BUY|EXECUTE_SELL|WAIT|REJECT), confidencePct (number), refinedEntry (number), refinedStopLoss (number), refinedTakeProfit (number), reasoningUz (string)}], positionActions: [{positionId, symbol, action (HOLD|MOVE_BREAKEVEN|MODIFY_SL_TP|TRAIL_PROFIT|CLOSE_PROFIT|CLOSE_LOSS_CUT), newStopLoss (number|null), newTakeProfit (number|null), reasoningUz (string)}]`,
+          userPrompt
+        );
+      } else {
+        const ai = getAiClient();
+        const response = await ai.models.generateContent({
+          model: 'gemini-4-hydrogen',
+          contents: userPrompt,
+          config: {
+            systemInstruction: sysInst,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                overallBriefUz: { type: Type.STRING },
+                entryDecisions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      symbol: { type: Type.STRING },
+                      decision: { type: Type.STRING },
+                      confidencePct: { type: Type.NUMBER },
+                      refinedEntry: { type: Type.NUMBER },
+                      refinedStopLoss: { type: Type.NUMBER },
+                      refinedTakeProfit: { type: Type.NUMBER },
+                      reasoningUz: { type: Type.STRING },
+                    },
+                  },
+                },
+                positionActions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      positionId: { type: Type.STRING },
+                      symbol: { type: Type.STRING },
+                      action: { type: Type.STRING },
+                      newStopLoss: { type: Type.NUMBER, nullable: true },
+                      newTakeProfit: { type: Type.NUMBER, nullable: true },
+                      reasoningUz: { type: Type.STRING },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        });
+        const raw = (response.text ?? '{}').trim();
+        parsed = JSON.parse(raw);
+      }
+
+      // Persist LLM decisions back into perSymbolReports & local memory
+      const entryDecisions = Array.isArray(parsed.entryDecisions) ? parsed.entryDecisions : [];
+      const positionActions = Array.isArray(parsed.positionActions) ? parsed.positionActions : [];
+
+      for (const ed of entryDecisions) {
+        if (!ed?.symbol) continue;
+        const existing = db.perSymbolReports[ed.symbol.toUpperCase()] ?? db.perSymbolReports[ed.symbol];
+        if (existing) {
+          existing.llmDecision = ed.decision;
+          existing.llmConfidencePct = Number(ed.confidencePct) || existing.analyticalScore;
+          existing.llmReasoningUz = String(ed.reasoningUz || '').slice(0, 400);
+          if (ed.refinedStopLoss > 0) existing.stopLoss = ed.refinedStopLoss;
+          if (ed.refinedTakeProfit > 0) existing.takeProfit = ed.refinedTakeProfit;
+        }
+      }
+
+      db.engineMetrics.lastAiLlmTime = new Date().toISOString();
+      db.engineMetrics.aiAnalysisState = 'ACTIVE';
+      db.engineMetrics.aiAnalysisError = null;
+      saveMemoryDb(db);
+
+      return res.json({
+        ok: true,
+        llmUsed: true,
+        provider: providerUsed,
+        overallBriefUz: String(parsed.overallBriefUz || 'AI chuqur tahlili yakunlandi.'),
+        entryDecisions,
+        positionActions,
+        timestamp: db.engineMetrics.lastAiLlmTime,
+      });
+    } catch (error) {
+      console.error('Autonomous AI Decide Error:', error);
+      const message = error instanceof Error ? error.message : 'AI avtonom qaror xatosi.';
+      const db = loadMemoryDb();
+      db.engineMetrics.aiAnalysisState = 'ERROR';
+      db.engineMetrics.aiAnalysisError = message;
+      saveMemoryDb(db);
+      return res.status(500).json({ error: message, llmUsed: false });
+    }
   });
 
   /* ==================== LOCAL DISK MEMORY & BACKUP/RECOVERY ==================== */

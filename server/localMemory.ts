@@ -74,6 +74,108 @@ export interface HistoricalSignalRecord {
   pnlUsd: number;
 }
 
+export type AiAnalysisState = 'ACTIVE' | 'IDLE' | 'ERROR';
+
+export type DiagnosticBlockerCode =
+  | 'NO_MARKET_DATA'
+  | 'SCANNER_STOPPED'
+  | 'NO_VALID_SETUP'
+  | 'STRATEGY_NOT_APPROVED'
+  | 'STRATEGY_DISAGREEMENT'
+  | 'RISK_LIMIT_REACHED'
+  | 'TRADING_PERMISSION_DISABLED'
+  | 'ACCOUNT_READ_ONLY'
+  | 'MARKET_CLOSED'
+  | 'BROKER_REJECTED_ORDER'
+  | 'EXECUTION_SERVICE_UNAVAILABLE'
+  | 'MODE_NOT_AUTONOMOUS'
+  | 'REAL_ACCOUNT_PERMISSION_REQUIRED'
+  | 'DUPLICATE_SIGNAL_BLOCKED'
+  | 'AI_API_UNCONFIGURED';
+
+export interface DiagnosticBlocker {
+  code: DiagnosticBlockerCode;
+  severity: 'CRITICAL' | 'WARNING' | 'INFO';
+  titleUz: string;
+  detailUz: string;
+  symbol?: string;
+}
+
+export interface InstrumentAnalysisSnapshot {
+  symbol: string;
+  timeframe: string;
+  timestamp: string;
+  price: number;
+  action: 'BUY' | 'SELL' | 'WAIT' | 'NO TRADE';
+  analyticalScore: number;
+  regime: string;
+  regimeLabelUz: string;
+  mtfAlignmentPct: number;
+  mtfConflict: boolean;
+  approvedBuyVotes: number;
+  approvedSellVotes: number;
+  totalApprovedActive: number;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  recommendedLot: number;
+  riskRewardRatio: number;
+  riskAllowed: boolean;
+  riskBlockReasons: string[];
+  explanationUz: string;
+  llmDecision?: string;
+  llmConfidencePct?: number;
+  llmReasoningUz?: string;
+  signalHash: string;
+}
+
+export interface ExecutionLogEntry {
+  id: string;
+  timestamp: string;
+  type: 'ORDER_SENT' | 'ORDER_REJECTED' | 'SL_TP_MODIFIED' | 'BREAK_EVEN' | 'TRAILING_STOP' | 'AI_CLOSED' | 'STRESS_TEST';
+  symbol: string;
+  side?: 'LONG' | 'SHORT';
+  positionId?: string;
+  lotSize?: number;
+  entryPrice?: number;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+  pnlUsd?: number;
+  source: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER' | 'TEST';
+  accountMode: 'MT5_DEMO' | 'MT5_REAL' | 'SIMULATED_DEMO';
+  reasonUz: string;
+  brokerMessage?: string;
+}
+
+export interface ExecutedSignalRecord {
+  hash: string;
+  symbol: string;
+  direction: string;
+  timestamp: string;
+  expiresAt: number;
+}
+
+export interface EngineMetricsRecord {
+  aiAnalysisState: AiAnalysisState;
+  aiAnalysisError: string | null;
+  lastCycleTime: string | null;
+  lastAiLlmTime: string | null;
+  instrumentsAnalyzed: number;
+  signalsGenerated: number;
+  buySignals: number;
+  sellSignals: number;
+  waitSignals: number;
+  noTradeSignals: number;
+  ordersSent: number;
+  ordersRejected: number;
+  aiSlTpModifications: number;
+  aiClosedPositions: number;
+  openPositionsCount: number;
+  lastSuccessfulExecution: string | null;
+  lastRejectionReason: string | null;
+  currentPortfolioRiskPct: number;
+}
+
 export interface ControlStateRecord {
   scannerStatus: 'RUNNING' | 'PAUSED';
   stopNewTrades: boolean;
@@ -82,6 +184,10 @@ export interface ControlStateRecord {
   lastAnalysisTime: string | null;
   instrumentsScanned: number;
   lastBackupAt: string | null;
+  maxOpenOrders: number;
+  maxPortfolioRiskPct: number;
+  aiAutoSlTpEnabled: boolean;
+  allowRealAccountTrading: boolean;
 }
 
 export interface LocalMemoryDatabase {
@@ -93,6 +199,11 @@ export interface LocalMemoryDatabase {
   notifications: SystemNotificationRecord[];
   analyses: HistoricalAnalysisRecord[];
   signals: HistoricalSignalRecord[];
+  engineMetrics: EngineMetricsRecord;
+  diagnostics: DiagnosticBlocker[];
+  perSymbolReports: Record<string, InstrumentAnalysisSnapshot>;
+  executionLogs: ExecutionLogEntry[];
+  executedSignalHashes: ExecutedSignalRecord[];
 }
 
 function seedDefaultStrategies(): StrategyRegistryRecord[] {
@@ -260,10 +371,82 @@ function seedDefaultStrategies(): StrategyRegistryRecord[] {
   ];
 }
 
+function createDefaultEngineMetrics(): EngineMetricsRecord {
+  return {
+    aiAnalysisState: 'IDLE',
+    aiAnalysisError: null,
+    lastCycleTime: null,
+    lastAiLlmTime: null,
+    instrumentsAnalyzed: 0,
+    signalsGenerated: 0,
+    buySignals: 0,
+    sellSignals: 0,
+    waitSignals: 0,
+    noTradeSignals: 0,
+    ordersSent: 0,
+    ordersRejected: 0,
+    aiSlTpModifications: 0,
+    aiClosedPositions: 0,
+    openPositionsCount: 0,
+    lastSuccessfulExecution: null,
+    lastRejectionReason: null,
+    currentPortfolioRiskPct: 0,
+  };
+}
+
+function hydrateDb(parsed: Partial<LocalMemoryDatabase>): LocalMemoryDatabase {
+  const now = new Date().toISOString();
+  const baseControl = parsed.control ?? ({} as Partial<ControlStateRecord>);
+  return {
+    schemaVersion: 2,
+    createdAt: parsed.createdAt ?? now,
+    updatedAt: parsed.updatedAt ?? now,
+    control: {
+      scannerStatus: baseControl.scannerStatus === 'PAUSED' ? 'PAUSED' : 'RUNNING',
+      stopNewTrades: Boolean(baseControl.stopNewTrades),
+      autonomousMode:
+        baseControl.autonomousMode === 'AUTONOMOUS' || baseControl.autonomousMode === 'SIGNAL'
+          ? baseControl.autonomousMode
+          : 'OBSERVATION',
+      autoBackupEnabled: baseControl.autoBackupEnabled ?? true,
+      lastAnalysisTime: baseControl.lastAnalysisTime ?? null,
+      instrumentsScanned: Number(baseControl.instrumentsScanned) || 0,
+      lastBackupAt: baseControl.lastBackupAt ?? null,
+      maxOpenOrders:
+        typeof baseControl.maxOpenOrders === 'number' && baseControl.maxOpenOrders >= 1
+          ? Math.min(100, Math.round(baseControl.maxOpenOrders))
+          : 20,
+      maxPortfolioRiskPct:
+        typeof baseControl.maxPortfolioRiskPct === 'number' && baseControl.maxPortfolioRiskPct >= 0.5
+          ? Math.min(25, baseControl.maxPortfolioRiskPct)
+          : 5.0,
+      aiAutoSlTpEnabled: baseControl.aiAutoSlTpEnabled ?? true,
+      allowRealAccountTrading: Boolean(baseControl.allowRealAccountTrading),
+    },
+    strategies: Array.isArray(parsed.strategies) ? parsed.strategies : seedDefaultStrategies(),
+    notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
+    analyses: Array.isArray(parsed.analyses) ? parsed.analyses : [],
+    signals: Array.isArray(parsed.signals) ? parsed.signals : [],
+    engineMetrics: {
+      ...createDefaultEngineMetrics(),
+      ...(parsed.engineMetrics ?? {}),
+    },
+    diagnostics: Array.isArray(parsed.diagnostics) ? parsed.diagnostics : [],
+    perSymbolReports:
+      parsed.perSymbolReports && typeof parsed.perSymbolReports === 'object'
+        ? parsed.perSymbolReports
+        : {},
+    executionLogs: Array.isArray(parsed.executionLogs) ? parsed.executionLogs : [],
+    executedSignalHashes: Array.isArray(parsed.executedSignalHashes)
+      ? parsed.executedSignalHashes
+      : [],
+  };
+}
+
 function createInitialDb(): LocalMemoryDatabase {
   const now = new Date().toISOString();
-  return {
-    schemaVersion: 1,
+  return hydrateDb({
+    schemaVersion: 2,
     createdAt: now,
     updatedAt: now,
     control: {
@@ -274,6 +457,10 @@ function createInitialDb(): LocalMemoryDatabase {
       lastAnalysisTime: null,
       instrumentsScanned: 0,
       lastBackupAt: null,
+      maxOpenOrders: 20,
+      maxPortfolioRiskPct: 5.0,
+      aiAutoSlTpEnabled: true,
+      allowRealAccountTrading: false,
     },
     strategies: seedDefaultStrategies(),
     notifications: [
@@ -289,7 +476,12 @@ function createInitialDb(): LocalMemoryDatabase {
     ],
     analyses: [],
     signals: [],
-  };
+    engineMetrics: createDefaultEngineMetrics(),
+    diagnostics: [],
+    perSymbolReports: {},
+    executionLogs: [],
+    executedSignalHashes: [],
+  });
 }
 
 function ensureStorageDirs() {
@@ -314,12 +506,12 @@ export function loadMemoryDb(): LocalMemoryDatabase {
   }
   try {
     const raw = fs.readFileSync(DB_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as LocalMemoryDatabase;
+    const parsed = JSON.parse(raw) as Partial<LocalMemoryDatabase>;
     if (!parsed || !Array.isArray(parsed.strategies) || !parsed.control) {
       throw new Error('Corrupted DB structure');
     }
     dbHealthy = true;
-    return parsed;
+    return hydrateDb(parsed);
   } catch {
     // Attempt automatic recovery from latest valid backup
     const backups = listBackups();
@@ -328,11 +520,12 @@ export function loadMemoryDb(): LocalMemoryDatabase {
         const resolved = resolveSafeBackupPath(b.filename);
         if (!resolved) continue;
         const raw = fs.readFileSync(resolved, 'utf8');
-        const recovered = JSON.parse(raw) as LocalMemoryDatabase;
+        const recovered = JSON.parse(raw) as Partial<LocalMemoryDatabase>;
         if (recovered && Array.isArray(recovered.strategies)) {
-          saveMemoryDb(recovered);
+          const hydrated = hydrateDb(recovered);
+          saveMemoryDb(hydrated);
           dbHealthy = true;
-          return recovered;
+          return hydrated;
         }
       } catch {
         // try older backup

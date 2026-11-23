@@ -657,6 +657,18 @@ def snapshot_mt5_state() -> Dict[str, Any]:
         "margin_free": round(float(acct.margin_free), 2) if acct else 0.0,
         "profit": round(float(acct.profit), 2) if acct else 0.0,
         "realizedToday": round(realized_today, 2),
+        "tradeMode": (
+            "REAL" if acct and getattr(acct, "trade_mode", 0) == getattr(mt5, "ACCOUNT_TRADE_MODE_REAL", 2)
+            else "CONTEST" if acct and getattr(acct, "trade_mode", 0) == getattr(mt5, "ACCOUNT_TRADE_MODE_CONTEST", 1)
+            else "DEMO"
+        ),
+        "tradeAllowed": bool(
+            (acct is None or getattr(acct, "trade_allowed", True))
+            and (mt5.terminal_info() is None or getattr(mt5.terminal_info(), "trade_allowed", True))
+        ),
+        "investorReadOnly": bool(acct is not None and not getattr(acct, "trade_allowed", True)),
+        "currency": str(getattr(acct, "currency", "USD")) if acct else "USD",
+        "leverage": int(getattr(acct, "leverage", 100)) if acct else 100,
     }
 
     pairs = []
@@ -764,6 +776,12 @@ def execute_mt5_order(
     comment: str = "TradeKillerAI",
 ) -> Dict[str, Any]:
     actual = resolve_mt5_symbol(symbol)
+    acct_info = mt5.account_info()
+    if acct_info is not None and not getattr(acct_info, "trade_allowed", True):
+        raise HTTPException(
+            status_code=403,
+            detail="MT5 hisob faqat o'qish (Investor / Read-only) rejimida! Order yuborishga ruxsat yo'q.",
+        )
     t_info = mt5.terminal_info()
     if t_info is not None and not getattr(t_info, "trade_allowed", True):
         raise HTTPException(
@@ -836,17 +854,21 @@ def modify_mt5_sl_tp(position_id: str, sl: Optional[float], tp: Optional[float])
     if not targets:
         raise HTTPException(status_code=404, detail=f"Ticket #{position_id} topilmadi.")
     p = targets[0]
+    info = mt5.symbol_info(p.symbol)
+    digits = int(getattr(info, "digits", 5)) if info else 5
+    new_sl = round(float(sl), digits) if sl else 0.0
+    new_tp = round(float(tp), digits) if tp else 0.0
     res = mt5.order_send({
         "action": mt5.TRADE_ACTION_SLTP,
         "symbol": p.symbol,
         "position": p.ticket,
-        "sl": float(sl) if sl else 0.0,
-        "tp": float(tp) if tp else 0.0,
+        "sl": new_sl,
+        "tp": new_tp,
     })
     if res is None or res.retcode != mt5.TRADE_RETCODE_DONE:
-        detail = res.comment if res else str(mt5.last_error())
+        detail = f"{res.retcode}: {res.comment}" if res else str(mt5.last_error())
         raise HTTPException(status_code=400, detail=f"SL/TP o'zgartirish xatosi: {detail}")
-    return {"ticket": p.ticket, "sl": sl, "tp": tp}
+    return {"ticket": p.ticket, "sl": new_sl, "tp": new_tp}
 
 
 def get_proxy_settings() -> Dict[str, str]:

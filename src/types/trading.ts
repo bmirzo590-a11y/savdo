@@ -750,6 +750,100 @@ export interface SystemNotificationRecord {
   acknowledged: boolean;
 }
 
+export type AiAnalysisState = 'ACTIVE' | 'IDLE' | 'ERROR';
+
+export type DiagnosticBlockerCode =
+  | 'NO_MARKET_DATA'
+  | 'SCANNER_STOPPED'
+  | 'NO_VALID_SETUP'
+  | 'STRATEGY_NOT_APPROVED'
+  | 'STRATEGY_DISAGREEMENT'
+  | 'RISK_LIMIT_REACHED'
+  | 'TRADING_PERMISSION_DISABLED'
+  | 'ACCOUNT_READ_ONLY'
+  | 'MARKET_CLOSED'
+  | 'BROKER_REJECTED_ORDER'
+  | 'EXECUTION_SERVICE_UNAVAILABLE'
+  | 'MODE_NOT_AUTONOMOUS'
+  | 'REAL_ACCOUNT_PERMISSION_REQUIRED'
+  | 'DUPLICATE_SIGNAL_BLOCKED'
+  | 'AI_API_UNCONFIGURED';
+
+export interface DiagnosticBlocker {
+  code: DiagnosticBlockerCode;
+  severity: 'CRITICAL' | 'WARNING' | 'INFO';
+  titleUz: string;
+  detailUz: string;
+  symbol?: string;
+}
+
+export interface InstrumentAnalysisSnapshot {
+  symbol: string;
+  timeframe: string;
+  timestamp: string;
+  price: number;
+  action: 'BUY' | 'SELL' | 'WAIT' | 'NO TRADE';
+  analyticalScore: number;
+  regime: string;
+  regimeLabelUz: string;
+  mtfAlignmentPct: number;
+  mtfConflict: boolean;
+  approvedBuyVotes: number;
+  approvedSellVotes: number;
+  totalApprovedActive: number;
+  entryPrice: number;
+  stopLoss: number;
+  takeProfit: number;
+  recommendedLot: number;
+  riskRewardRatio: number;
+  riskAllowed: boolean;
+  riskBlockReasons: string[];
+  explanationUz: string;
+  llmDecision?: string;
+  llmConfidencePct?: number;
+  llmReasoningUz?: string;
+  signalHash: string;
+}
+
+export interface ExecutionLogEntry {
+  id: string;
+  timestamp: string;
+  type: 'ORDER_SENT' | 'ORDER_REJECTED' | 'SL_TP_MODIFIED' | 'BREAK_EVEN' | 'TRAILING_STOP' | 'AI_CLOSED' | 'STRESS_TEST';
+  symbol: string;
+  side?: 'LONG' | 'SHORT';
+  positionId?: string;
+  lotSize?: number;
+  entryPrice?: number;
+  stopLoss?: number | null;
+  takeProfit?: number | null;
+  pnlUsd?: number;
+  source: 'AI_LLM' | 'ENSEMBLE_ENGINE' | 'OWNER' | 'TEST';
+  accountMode: 'MT5_DEMO' | 'MT5_REAL' | 'SIMULATED_DEMO';
+  reasonUz: string;
+  brokerMessage?: string;
+}
+
+export interface EngineMetricsRecord {
+  aiAnalysisState: AiAnalysisState;
+  aiAnalysisError: string | null;
+  lastCycleTime: string | null;
+  lastAiLlmTime: string | null;
+  instrumentsAnalyzed: number;
+  signalsGenerated: number;
+  buySignals: number;
+  sellSignals: number;
+  waitSignals: number;
+  noTradeSignals: number;
+  ordersSent: number;
+  ordersRejected: number;
+  aiSlTpModifications: number;
+  aiClosedPositions: number;
+  openPositionsCount: number;
+  lastSuccessfulExecution: string | null;
+  lastRejectionReason: string | null;
+  currentPortfolioRiskPct: number;
+}
+
 export interface ControlStateRecord {
   scannerStatus: 'RUNNING' | 'PAUSED';
   stopNewTrades: boolean;
@@ -758,6 +852,10 @@ export interface ControlStateRecord {
   lastAnalysisTime: string | null;
   instrumentsScanned: number;
   lastBackupAt: string | null;
+  maxOpenOrders: number;
+  maxPortfolioRiskPct: number;
+  aiAutoSlTpEnabled: boolean;
+  allowRealAccountTrading: boolean;
 }
 
 export interface LiveSystemStatusSnapshot {
@@ -774,6 +872,10 @@ export interface LiveSystemStatusSnapshot {
     active: number;
     pending: number;
   };
+  engineMetrics?: EngineMetricsRecord;
+  diagnostics?: DiagnosticBlocker[];
+  perSymbolReports?: Record<string, InstrumentAnalysisSnapshot>;
+  executionLogs?: ExecutionLogEntry[];
   memory: {
     usedMb: number;
     totalMb: number;
@@ -787,6 +889,18 @@ export interface LiveSystemStatusSnapshot {
   };
   activeSessions: number;
   unreadNotifications: number;
+  timestamp: string;
+}
+
+export interface DemoStressTestResult {
+  passed: boolean;
+  ordersExecuted: number;
+  duplicatesBlocked: number;
+  riskBlocked: number;
+  brokerRejected: number;
+  slTpSynced: number;
+  finalSimulatedRiskPct: number;
+  details: string[];
   timestamp: string;
 }
 
