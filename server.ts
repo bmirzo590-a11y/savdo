@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'node:http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -58,6 +59,7 @@ import {
   selectMt5BrokerSymbol,
   sendOrderToMt5Bridge,
   startMt5BridgeSyncLoop,
+  stopMt5BridgeSyncLoop,
   syncMt5BridgeNow,
   syncMt5HistoricalData,
   updateMt5BridgeConfig,
@@ -94,7 +96,17 @@ import type { Timeframe } from './src/types/trading';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = Number(process.env.PORT) || 3000;
+function resolveCliArg(flag: string): string | undefined {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length) {
+    return process.argv[idx + 1];
+  }
+  const prefixed = process.argv.find((a) => a.startsWith(`${flag}=`));
+  return prefixed ? prefixed.slice(flag.length + 1) : undefined;
+}
+
+const PORT = Number(resolveCliArg('--port') || process.env.PORT) || 3000;
+const HOST = resolveCliArg('--host') || '0.0.0.0';
 
 function getAiClient() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -2444,6 +2456,13 @@ Qoidalar:
     });
   });
 
+  app.get('/favicon.ico', (_req, res) => {
+    res.status(204).end();
+  });
+
+  const httpServer = http.createServer(app);
+  let viteServer: { close: () => Promise<void> } | null = null;
+
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
@@ -2453,17 +2472,33 @@ Qoidalar:
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        // Attach Vite WebSocket to the same Express HTTP server so it never
+        // collides on standalone port 24678 or fails proxy WebSocket handshakes.
+        ws: { server: httpServer } as never,
+      },
       appType: 'spa',
     });
+    viteServer = vite;
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  httpServer.listen(PORT, HOST, () => {
     console.log(`Trade Killer server http://localhost:${PORT} da ishlamoqda (MT5-ONLY rejim)`);
     startMt5BridgeSyncLoop();
     startBackendScannerLoop(evaluateAnalysisWithLlm, 45_000);
   });
+
+  const shutdown = () => {
+    stopMt5BridgeSyncLoop();
+    void viteServer?.close().catch(() => {});
+    httpServer.close(() => {
+      process.exit(0);
+    });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 startServer().catch((err) => {
