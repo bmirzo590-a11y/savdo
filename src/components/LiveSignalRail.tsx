@@ -1,362 +1,643 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
-  ArrowDownRight,
-  ArrowUpRight,
-  BrainCircuit,
-  Clock,
-  ShieldCheck,
-  SlidersHorizontal,
+  Activity,
+  AlertTriangle,
+  Brain,
+  CheckCircle2,
+  Cpu,
+  Layers,
+  Play,
+  RefreshCw,
+  ShieldAlert,
+  TrendingDown,
+  TrendingUp,
 } from 'lucide-react';
 import {
-  LiveSystemStatusSnapshot,
   MarketPair,
-  Position,
-  RiskEvaluationResult,
-  StrategyBrainSnapshot,
-  TradingStyle,
+  OrderSide,
+  Timeframe,
+  UnifiedAnalysisRecord,
+  UnifiedStateSnapshot,
   ViewId,
 } from '../types/trading';
 import { formatPrice } from '../config/initialData';
-import { OrderPanel } from './OrderPanel';
 
 interface LiveSignalRailProps {
   pairs: MarketPair[];
   selectedSymbol: string;
-  tradingStyle: TradingStyle;
+  timeframe: Timeframe;
+  unifiedState: UnifiedStateSnapshot | null;
+  analyzingSymbol: string | null;
+  refreshing: boolean;
   onSelectSymbol: (symbol: string) => void;
-  allPairBrains: StrategyBrainSnapshot[];
-  systemStatus: LiveSystemStatusSnapshot | null;
-  availableBalance: number;
-  equity: number;
-  riskEvaluation: RiskEvaluationResult;
-  tradingBlocked: boolean;
-  mt5Connected: boolean;
-  onPlaceOrder: (order: Omit<Position, 'id' | 'openedAt'>) => void;
+  onRunAnalysis: (symbol: string, timeframe: Timeframe) => Promise<void>;
+  onRefreshUnified: () => Promise<void>;
+  onSubmitOrder: (payload: {
+    symbol: string;
+    side: OrderSide;
+    orderType: 'MARKET' | 'LIMIT';
+    lotSize: number;
+    entryPrice?: number;
+    stopLoss: number | null;
+    takeProfit: number | null;
+    analysisId?: string | null;
+    strategyName?: string;
+  }) => Promise<{ ok: boolean; error?: string }>;
   onNavigate: (view: ViewId) => void;
 }
 
 export const LiveSignalRail: React.FC<LiveSignalRailProps> = ({
   pairs,
   selectedSymbol,
-  tradingStyle,
+  timeframe,
+  unifiedState,
+  analyzingSymbol,
+  refreshing,
   onSelectSymbol,
-  allPairBrains,
-  systemStatus,
-  availableBalance,
-  equity,
-  riskEvaluation,
-  tradingBlocked,
-  mt5Connected,
-  onPlaceOrder,
+  onRunAnalysis,
+  onRefreshUnified,
+  onSubmitOrder,
   onNavigate,
 }) => {
-  const [rightTab, setRightTab] = useState<'signals' | 'order'>('signals');
-  const [signalFilter, setSignalFilter] = useState<'ALL' | 'BUY' | 'SELL' | 'WAIT'>('ALL');
+  const [activeTab, setActiveTab] = useState<'analyst' | 'signals' | 'order'>('analyst');
 
-  const activePair = useMemo(
-    () => pairs.find((p) => p.symbol === selectedSymbol) ?? pairs[0],
-    [pairs, selectedSymbol]
-  );
+  const analysis: UnifiedAnalysisRecord | null =
+    unifiedState?.analysesBySymbol[selectedSymbol] ?? null;
+  const signals = unifiedState?.signals ?? [];
 
-  const brainBySymbol = useMemo(() => {
-    const map = new Map<string, StrategyBrainSnapshot>();
-    allPairBrains.forEach((b) => map.set(b.symbol, b));
-    return map;
-  }, [allPairBrains]);
+  const activePair = pairs.find((p) => p.symbol === selectedSymbol) ?? pairs[0];
+  const livePrice = analysis?.latestPrice ?? activePair?.price ?? 0;
 
-  // Build real deterministic signal feed across all pairs from Strategy Brain
-  const liveSignals = useMemo(() => {
-    return pairs
-      .map((pair) => {
-        const brain = brainBySymbol.get(pair.symbol);
-        const rawVerdict =
-          tradingStyle === 'SCALPING'
-            ? brain?.verdict.scalpingAction ?? 'KUTISH'
-            : brain?.verdict.longTermAction ?? 'KUTISH';
-        const action: 'BUY' | 'SELL' | 'WAIT' =
-          rawVerdict === 'BUY' ? 'BUY' : rawVerdict === 'SELL' ? 'SELL' : 'WAIT';
-        const confidence = Math.round(
-          tradingStyle === 'SCALPING'
-            ? brain?.verdict.scalpingScore ?? 50
-            : brain?.verdict.longTermScore ?? 50
-        );
-        const atrProxy = pair.price * (pair.assetClass === 'CRYPTO' ? 0.012 : 0.0045);
-        const sl = action === 'SELL' ? pair.price + atrProxy : pair.price - atrProxy;
-        const tp = action === 'SELL' ? pair.price - atrProxy * 2.1 : pair.price + atrProxy * 2.1;
-        const topReason = brain?.verdict.reasons?.[0] ?? 'Multi-Strategy Ensemble';
-        const smcZone = brain?.smcDeep?.zone ?? brain?.smc.zone ?? 'Equilibrium';
-        return {
-          symbol: pair.symbol,
-          price: pair.price,
-          change24h: pair.change24h,
-          spreadPoints: pair.spreadPoints,
-          action,
-          confidence,
-          entry: pair.price,
-          sl,
-          tp,
-          topReason,
-          smcZone,
-        };
-      })
-      .sort((a, b) => {
-        if (a.action !== 'WAIT' && b.action === 'WAIT') return -1;
-        if (a.action === 'WAIT' && b.action !== 'WAIT') return 1;
-        return b.confidence - a.confidence;
-      });
-  }, [pairs, brainBySymbol, tradingStyle]);
+  // Order ticket state (strictly Test Mode validated by backend 8-dimension Risk Engine)
+  const [side, setSide] = useState<OrderSide>('LONG');
+  const [orderType, setOrderType] = useState<'MARKET' | 'LIMIT'>('MARKET');
+  const [lotSize, setLotSize] = useState<string>('0.05');
+  const [entryInput, setEntryInput] = useState<string>('');
+  const [slInput, setSlInput] = useState<string>('');
+  const [tpInput, setTpInput] = useState<string>('');
+  const [submittingOrder, setSubmittingOrder] = useState(false);
+  const [orderFeedback, setOrderFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  const filteredSignals = useMemo(() => {
-    if (signalFilter === 'ALL') return liveSignals;
-    return liveSignals.filter((s) => s.action === signalFilter);
-  }, [liveSignals, signalFilter]);
+  useEffect(() => {
+    if (!analysis) return;
+    if (analysis.decision === 'SELL') setSide('SHORT');
+    else if (analysis.decision === 'BUY') setSide('LONG');
+    if (analysis.risk?.recommendedLot) {
+      setLotSize(String(Math.min(analysis.risk.recommendedLot, 0.5)));
+    }
+    setEntryInput(analysis.entry ? String(analysis.entry) : livePrice > 0 ? String(livePrice) : '');
+    setSlInput(analysis.stopLoss ? String(analysis.stopLoss) : '');
+    setTpInput(analysis.takeProfit ? String(analysis.takeProfit) : '');
+    setOrderFeedback(null);
+  }, [analysis?.analysisId, selectedSymbol]);
 
-  const capabilities = [
-    {
-      label: 'AI Analitik',
-      state: systemStatus?.aiStatus === 'UNCONFIGURED' ? 'Lokal dvigatel' : 'LLM + Kvant',
-      ok: true,
-      target: 'analyst' as ViewId,
-    },
-    {
-      label: '24/7 Skaner',
-      state: systemStatus?.control.scannerStatus === 'PAUSED' ? 'Pauzada' : 'Faol',
-      ok: systemStatus?.control.scannerStatus !== 'PAUSED',
-      target: 'scanner' as ViewId,
-    },
-    {
-      label: 'ICT / SMC',
-      state: 'BOS · OB · FVG',
-      ok: true,
-      target: 'smc' as ViewId,
-    },
-    {
-      label: 'Risk Himoya',
-      state: tradingBlocked ? 'Bloklangan' : 'Kuzatmoqda',
-      ok: !tradingBlocked,
-      target: 'risk' as ViewId,
-    },
-  ];
+  const handlePlaceOrder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingOrder(true);
+    setOrderFeedback(null);
+    const parsedLot = Number(lotSize);
+    const parsedEntry = Number(entryInput);
+    const parsedSl = slInput.trim() ? Number(slInput) : null;
+    const parsedTp = tpInput.trim() ? Number(tpInput) : null;
+
+    const res = await onSubmitOrder({
+      symbol: selectedSymbol,
+      side,
+      orderType,
+      lotSize: Number.isFinite(parsedLot) && parsedLot > 0 ? parsedLot : 0.05,
+      entryPrice: orderType === 'LIMIT' && Number.isFinite(parsedEntry) ? parsedEntry : undefined,
+      stopLoss: parsedSl && Number.isFinite(parsedSl) ? parsedSl : null,
+      takeProfit: parsedTp && Number.isFinite(parsedTp) ? parsedTp : null,
+      analysisId: analysis?.analysisId ?? null,
+      strategyName: analysis?.ensemble.strategyConfirmation ?? 'AI Ensemble Test',
+    });
+
+    setSubmittingOrder(false);
+    if (res.ok) {
+      setOrderFeedback({ type: 'ok', text: `${selectedSymbol} ${side} Test-Mode buyurtma Risk Engine tasdig‘i bilan ochildi.` });
+    } else {
+      setOrderFeedback({ type: 'err', text: res.error || 'Buyurtma rad etildi.' });
+    }
+  };
+
+  const decisionColor = (d?: string) => {
+    if (d === 'BUY') return 'text-emerald-600 dark:text-[#00E5A0]';
+    if (d === 'SELL') return 'text-rose-600 dark:text-rose-400';
+    if (d === 'DATA_UNAVAILABLE') return 'text-rose-500 dark:text-rose-400';
+    return 'text-amber-600 dark:text-amber-300';
+  };
+
+  const isAnalyzingCurrent = analyzingSymbol === selectedSymbol;
 
   return (
-    <aside className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass flex flex-col h-full overflow-hidden">
-      {/* Top Mode Switcher: Live AI Signals vs Fast MT5 Order */}
-      <div className="p-2.5 border-b border-slate-200 dark:border-violet-500/20 flex items-center justify-between gap-2 bg-slate-50/70 dark:bg-[#080D1B]/80">
-        <div className="grid grid-cols-2 gap-1 p-0.5 rounded-lg bg-slate-200/70 dark:bg-[#050811] border border-slate-200 dark:border-violet-500/20 w-full">
+    <aside className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-3.5 h-full flex flex-col gap-3">
+      {/* Header & Tabs */}
+      <div className="flex items-center justify-between gap-2 border-b border-slate-200 dark:border-violet-500/15 pb-2.5">
+        <div className="flex items-center gap-1 p-0.5 rounded-lg bg-slate-100 dark:bg-[#080D1B] border border-slate-200 dark:border-violet-500/20">
           <button
             type="button"
-            onClick={() => setRightTab('signals')}
-            className={`px-2.5 py-1.5 text-xs font-semibold rounded-md transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
-              rightTab === 'signals'
-                ? 'bg-white dark:bg-gradient-to-r dark:from-violet-600/35 dark:to-sky-600/35 text-slate-900 dark:text-white border border-transparent dark:border-violet-400/40'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            onClick={() => setActiveTab('analyst')}
+            className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
+              activeTab === 'analyst'
+                ? 'bg-white dark:bg-violet-500/25 text-slate-900 dark:text-violet-200'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
             }`}
           >
-            <BrainCircuit className="w-3.5 h-3.5 text-violet-500 dark:text-violet-400" />
-            <span>AI Signallar</span>
+            AI Analyst
           </button>
-
           <button
             type="button"
-            onClick={() => setRightTab('order')}
-            className={`px-2.5 py-1.5 text-xs font-semibold rounded-md transition-all flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap ${
-              rightTab === 'order'
-                ? 'bg-white dark:bg-gradient-to-r dark:from-sky-600/35 dark:to-emerald-600/30 text-slate-900 dark:text-white border border-transparent dark:border-sky-400/40'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            onClick={() => setActiveTab('signals')}
+            className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer font-mono tabular-nums ${
+              activeTab === 'signals'
+                ? 'bg-white dark:bg-sky-500/25 text-slate-900 dark:text-sky-200'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
             }`}
           >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-sky-500 dark:text-sky-400" />
-            <span>Tezkor Order</span>
+            Signallar ({signals.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('order')}
+            className={`px-2.5 py-1 text-[11px] font-semibold rounded-md transition-colors cursor-pointer ${
+              activeTab === 'order'
+                ? 'bg-white dark:bg-emerald-500/25 text-slate-900 dark:text-emerald-200'
+                : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
+            }`}
+          >
+            Test Order
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={() => void onRefreshUnified()}
+          disabled={refreshing}
+          className="p-1.5 rounded-lg border border-slate-200 dark:border-violet-500/25 text-slate-500 dark:text-slate-300 hover:text-sky-400 hover:border-sky-400/50 transition-colors cursor-pointer disabled:opacity-50"
+          title="Backend holatini yangilash"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
-      {rightTab === 'order' ? (
-        <div className="flex-1 overflow-y-auto">
-          <OrderPanel
-            pair={activePair}
-            availableBalance={availableBalance}
-            equity={equity}
-            riskEvaluation={riskEvaluation}
-            tradingBlocked={tradingBlocked}
-            onPlaceOrder={onPlaceOrder}
-          />
-        </div>
-      ) : (
-        <div className="flex-1 flex flex-col min-h-0">
-          {/* AI Capabilities Compact Matrix */}
-          <div className="p-3 border-b border-slate-200 dark:border-violet-500/15 space-y-2">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="font-semibold text-slate-800 dark:text-slate-200">
-                AI Qobiliyatlar Moduli
-              </span>
-              <span className="font-mono text-slate-500 dark:text-slate-400">
-                {mt5Connected ? 'MT5 Real' : 'Demo Oqim'}
-              </span>
-            </div>
-            <div className="grid grid-cols-2 gap-1.5">
-              {capabilities.map((cap) => (
-                <button
-                  key={cap.label}
-                  type="button"
-                  onClick={() => onNavigate(cap.target)}
-                  className="px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50/70 dark:bg-[#080E1E] hover:border-sky-400/50 text-left transition-colors cursor-pointer"
-                >
-                  <div className="text-[11px] font-medium text-slate-700 dark:text-slate-300 truncate">
-                    {cap.label}
-                  </div>
-                  <div
-                    className={`text-[10px] font-mono font-semibold truncate ${
-                      cap.ok ? 'text-emerald-600 dark:text-[#00E5A0]' : 'text-amber-500'
-                    }`}
-                  >
-                    {cap.state}
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Signal Filter Controls */}
-          <div className="px-3 py-2 border-b border-slate-200 dark:border-violet-500/15 flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-slate-800 dark:text-slate-200 whitespace-nowrap">
-              Jonli Signal Lentasi
-            </span>
-            <div className="flex items-center gap-1">
-              {(['ALL', 'BUY', 'SELL', 'WAIT'] as const).map((f) => (
-                <button
-                  key={f}
-                  type="button"
-                  onClick={() => setSignalFilter(f)}
-                  className={`px-2 py-0.5 text-[10px] font-mono font-semibold rounded transition-colors cursor-pointer ${
-                    signalFilter === f
-                      ? 'bg-violet-500/20 text-violet-700 dark:text-violet-300 border border-violet-500/40'
-                      : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
-                  }`}
-                >
-                  {f}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Scrollable Live Signal Feed */}
-          <div className="flex-1 overflow-y-auto divide-y divide-slate-200/80 dark:divide-violet-500/15 max-h-[560px]">
-            {filteredSignals.length === 0 ? (
-              <div className="p-6 text-center text-xs text-slate-500 dark:text-slate-400 space-y-2">
-                <p>Tanlangan filtr bo‘yicha faol signal yo‘q.</p>
-                <button
-                  type="button"
-                  onClick={() => setSignalFilter('ALL')}
-                  className="text-sky-500 hover:underline cursor-pointer"
-                >
-                  Barcha signallarni ko‘rsatish
-                </button>
+      {/* TAB 1: UNIFIED AI ANALYST (CANONICAL BACKEND STATE) */}
+      {activeTab === 'analyst' && (
+        <div className="flex-1 flex flex-col gap-2.5 min-h-0 overflow-y-auto pr-0.5">
+          {/* Primary Action Bar */}
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5">
+                <Brain className="w-3.5 h-3.5 text-violet-500 dark:text-violet-400 shrink-0" />
+                <span className="text-xs font-bold text-slate-900 dark:text-white font-mono">
+                  {selectedSymbol} · {timeframe}
+                </span>
               </div>
-            ) : (
-              filteredSignals.map((sig) => {
-                const isSelected = sig.symbol === selectedSymbol;
-                const isBuy = sig.action === 'BUY';
-                const isSell = sig.action === 'SELL';
-                const actionClass = isBuy
-                  ? 'text-emerald-600 dark:text-[#00E5A0]'
-                  : isSell
-                    ? 'text-rose-600 dark:text-rose-400'
-                    : 'text-sky-600 dark:text-sky-400';
+              <p className="text-[10px] font-mono text-slate-400 truncate mt-0.5">
+                {analysis ? `ID: ${analysis.analysisId}` : 'Tahlil hali ishga tushmagan'}
+              </p>
+            </div>
 
-                return (
-                  <div
-                    key={sig.symbol}
-                    className={`p-3 space-y-1.5 transition-colors tk-signal-enter ${
-                      isSelected
-                        ? 'bg-violet-50/70 dark:bg-violet-500/10'
-                        : 'hover:bg-slate-50 dark:hover:bg-slate-900/50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <button
-                        type="button"
-                        onClick={() => onSelectSymbol(sig.symbol)}
-                        className="flex items-center gap-1.5 text-left cursor-pointer group"
-                      >
-                        <span className="font-mono font-bold text-xs text-slate-900 dark:text-white group-hover:text-sky-400">
-                          {sig.symbol}
-                        </span>
-                        <span className="font-mono tabular-nums text-[11px] text-slate-500">
-                          {formatPrice(sig.price)}
-                        </span>
-                      </button>
-
-                      <div className="flex items-center gap-2 font-mono tabular-nums text-xs">
-                        <span className={`font-bold flex items-center gap-0.5 ${actionClass}`}>
-                          {isBuy && <ArrowUpRight className="w-3.5 h-3.5" />}
-                          {isSell && <ArrowDownRight className="w-3.5 h-3.5" />}
-                          {!isBuy && !isSell && <Clock className="w-3 h-3" />}
-                          {sig.action}
-                        </span>
-                        <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                          {sig.confidence}%
-                        </span>
-                      </div>
-                    </div>
-
-                    {/* Confidence Neon Micro Bar */}
-                    <div className="h-1 w-full rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
-                      <div
-                        className={`h-full rounded-full ${
-                          isBuy
-                            ? 'bg-gradient-to-r from-sky-400 to-[#00E5A0]'
-                            : isSell
-                              ? 'bg-gradient-to-r from-violet-500 to-rose-500'
-                              : 'bg-sky-400/70'
-                        }`}
-                        style={{ width: `${Math.min(100, Math.max(12, sig.confidence))}%` }}
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between text-[10.5px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
-                      <span>E: {formatPrice(sig.entry)}</span>
-                      <span className="text-rose-500/90">SL: {formatPrice(sig.sl)}</span>
-                      <span className="text-emerald-500/90 dark:text-[#00E5A0]">TP: {formatPrice(sig.tp)}</span>
-                    </div>
-
-                    <div className="flex items-center justify-between gap-2 pt-0.5 text-[10.5px]">
-                      <span className="text-slate-500 dark:text-slate-400 truncate max-w-[185px]" title={sig.topReason}>
-                        {sig.topReason} · {sig.smcZone}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSelectSymbol(sig.symbol);
-                          setRightTab('order');
-                        }}
-                        className="text-sky-600 dark:text-sky-400 hover:underline font-medium cursor-pointer shrink-0"
-                      >
-                        Order
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* Risk Guard Mini Footer */}
-          <div className="p-2.5 border-t border-slate-200 dark:border-violet-500/20 bg-slate-50/70 dark:bg-[#080D1B]/80 flex items-center justify-between text-[11px]">
-            <span className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-500 dark:text-[#00E5A0]" />
-              <span>Risk: {riskEvaluation.riskPct.toFixed(1)}% · Lot {riskEvaluation.recommendedLot.toFixed(2)}</span>
-            </span>
             <button
               type="button"
-              onClick={() => setRightTab('order')}
-              className="font-semibold text-violet-600 dark:text-violet-400 hover:underline cursor-pointer"
+              onClick={() => void onRunAnalysis(selectedSymbol, timeframe)}
+              disabled={isAnalyzingCurrent}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition-colors cursor-pointer disabled:opacity-60 shrink-0"
             >
-              Order ochish →
+              {isAnalyzingCurrent ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Play className="w-3 h-3" />
+              )}
+              <span>{isAnalyzingCurrent ? 'Tahlil...' : 'Analyze Now'}</span>
             </button>
           </div>
+
+          {!analysis ? (
+            <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#080D1B] p-4 text-center">
+              <p className="text-xs font-medium text-slate-700 dark:text-slate-300">
+                {selectedSymbol} uchun real OHLC tahlili kutilmoqda.
+              </p>
+              <p className="text-[11px] text-slate-500 mt-1">
+                M1–W1, 18-strategiya Ensemble va Risk Engine ni ishga tushirish uchun <strong>Analyze Now</strong> tugmasini bosing.
+              </p>
+            </div>
+          ) : analysis.status === 'DATA_UNAVAILABLE' ? (
+            <div className="rounded-lg border border-rose-500/35 bg-rose-500/10 p-3 text-xs">
+              <div className="flex items-center gap-1.5 font-bold font-mono text-rose-500 dark:text-rose-400">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>DATA UNAVAILABLE</span>
+              </div>
+              <p className="text-[11px] text-slate-700 dark:text-slate-300 mt-1.5 leading-relaxed">
+                {analysis.error || analysis.explanationUz}
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Decision & Confidence Headline */}
+              <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#080D1B] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                      Yakuniy Qaror
+                    </span>
+                    <div className={`text-xl font-bold font-mono tracking-tight flex items-center gap-1.5 ${decisionColor(analysis.decision)}`}>
+                      {analysis.decision === 'BUY' && <TrendingUp className="w-4 h-4" />}
+                      {analysis.decision === 'SELL' && <TrendingDown className="w-4 h-4" />}
+                      <span>{analysis.decision}</span>
+                    </div>
+                  </div>
+                  <div className="text-right font-mono tabular-nums">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-500 dark:text-slate-400 block">
+                      Ishonch · R:R
+                    </span>
+                    <span className="text-sm font-bold text-slate-900 dark:text-white">
+                      {analysis.confidence}%
+                    </span>
+                    <span className="text-xs text-sky-500 dark:text-sky-400 ml-1.5">
+                      {analysis.riskRewardRatio ? `1:${analysis.riskRewardRatio}` : '—'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Data Source + Freshness + Regime */}
+                <div className="mt-2 pt-2 border-t border-slate-200 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[10.5px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                  <span className="text-emerald-600 dark:text-[#00E5A0]">
+                    {analysis.dataSource} · {analysis.barsCount} bar
+                    {analysis.dataFreshnessSec !== null ? ` (${analysis.dataFreshnessSec}s)` : ''}
+                  </span>
+                  <span className="text-violet-600 dark:text-violet-300 font-sans font-medium">
+                    {analysis.marketRegimeUz}
+                  </span>
+                </div>
+              </div>
+
+              {/* Trade Plan Grid (Entry / SL / TP / Lot) */}
+              <div className="grid grid-cols-4 gap-1.5 font-mono tabular-nums">
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-2">
+                  <div className="text-[9.5px] text-slate-400">ENTRY</div>
+                  <div className="text-xs font-semibold text-slate-900 dark:text-white mt-0.5 truncate">
+                    {analysis.entry !== null ? formatPrice(analysis.entry) : '—'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-2">
+                  <div className="text-[9.5px] text-rose-400">STOP LOSS</div>
+                  <div className="text-xs font-semibold text-rose-600 dark:text-rose-400 mt-0.5 truncate">
+                    {analysis.stopLoss !== null ? formatPrice(analysis.stopLoss) : '—'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-2">
+                  <div className="text-[9.5px] text-emerald-400">TAKE PROFIT</div>
+                  <div className="text-xs font-semibold text-emerald-600 dark:text-[#00E5A0] mt-0.5 truncate">
+                    {analysis.takeProfit !== null ? formatPrice(analysis.takeProfit) : '—'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-2">
+                  <div className="text-[9.5px] text-sky-400">REC LOT</div>
+                  <div className="text-xs font-semibold text-sky-600 dark:text-sky-300 mt-0.5 truncate">
+                    {analysis.risk ? analysis.risk.recommendedLot.toFixed(2) : '—'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 18-Strategy Ensemble Vote Summary */}
+              <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#080D1B] p-2.5 text-[11px]">
+                <div className="flex items-center justify-between font-mono tabular-nums">
+                  <span className="font-sans font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5 text-sky-400" />
+                    Ensemble ({analysis.ensemble.activeStrategiesCount}/{analysis.ensemble.totalStrategiesCount})
+                  </span>
+                  <span>
+                    <strong className="text-emerald-500">{analysis.ensemble.buyVotes}B</strong>
+                    {' / '}
+                    <strong className="text-rose-400">{analysis.ensemble.sellVotes}S</strong>
+                    {' / '}
+                    <strong className="text-slate-400">{analysis.ensemble.waitVotes}W</strong>
+                  </span>
+                </div>
+                <p className="text-[10.5px] text-slate-500 dark:text-slate-400 mt-1 truncate" title={analysis.ensemble.strategyConfirmation}>
+                  {analysis.ensemble.strategyConfirmation}
+                </p>
+                {analysis.ensemble.contradictionDetected && (
+                  <p className="text-[10.5px] text-amber-500 dark:text-amber-300 mt-1">
+                    Ziddiyat aniqlandi (BUY vs SELL) — xavfsizlik uchun WAIT berildi.
+                  </p>
+                )}
+              </div>
+
+              {/* MTF Alignment Strip */}
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-2.5 text-[10.5px]">
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    MTF ({analysis.mtfSummary.availableTimeframes.length} TF)
+                  </span>
+                  <span className="font-mono tabular-nums text-sky-500 dark:text-sky-400 font-semibold">
+                    Moslik: {analysis.mtfSummary.alignmentPct}%
+                  </span>
+                </div>
+                <div className="grid grid-cols-4 gap-1 font-mono tabular-nums">
+                  {analysis.mtfSummary.entries.map((m) => (
+                    <div
+                      key={m.timeframe}
+                      className="px-1.5 py-1 rounded border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0D1426] flex items-center justify-between"
+                    >
+                      <span className="text-slate-500 dark:text-slate-400">{m.timeframe}</span>
+                      <span
+                        className={
+                          m.bias === 'BULLISH'
+                            ? 'text-emerald-500 font-bold'
+                            : m.bias === 'BEARISH'
+                              ? 'text-rose-400 font-bold'
+                              : 'text-slate-400'
+                        }
+                      >
+                        {m.bias === 'BULLISH' ? '▲' : m.bias === 'BEARISH' ? '▼' : '—'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Technicals, Candlestick, SMC & Explanation */}
+              <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-2.5 text-[11px] space-y-1.5">
+                {analysis.indicators && (
+                  <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 font-mono tabular-nums text-[10.5px] text-slate-600 dark:text-slate-300">
+                    <span>RSI: <strong>{analysis.indicators.rsi14}</strong></span>
+                    <span>ADX: <strong>{analysis.indicators.adx14}</strong></span>
+                    <span>ATR: <strong>{analysis.indicators.atrPct}%</strong></span>
+                    <span>Vol: <strong>{analysis.indicators.volumeRatio}x</strong></span>
+                  </div>
+                )}
+                <p className="text-[10.5px] text-slate-600 dark:text-slate-300 leading-snug">
+                  <strong className="text-slate-800 dark:text-slate-100">SMC:</strong> {analysis.smcSummary}
+                </p>
+                <p className="text-[10.5px] text-slate-600 dark:text-slate-300 leading-snug">
+                  <strong className="text-slate-800 dark:text-slate-100">Shamlar:</strong> {analysis.candlestickSummary}
+                </p>
+                <p className="text-[10.5px] text-slate-500 dark:text-slate-400 leading-relaxed pt-1 border-t border-slate-200 dark:border-slate-800">
+                  {analysis.explanationUz}
+                </p>
+              </div>
+
+              {/* Honest LLM Status Box */}
+              <div
+                className={`rounded-lg border p-2.5 text-[10.5px] ${
+                  analysis.llmStatus === 'ACTIVE'
+                    ? 'border-emerald-500/30 bg-emerald-500/5'
+                    : analysis.llmStatus === 'ERROR'
+                      ? 'border-rose-500/30 bg-rose-500/5'
+                      : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B]'
+                }`}
+              >
+                <div className="flex items-center justify-between font-mono">
+                  <span className="flex items-center gap-1 font-sans font-semibold text-slate-700 dark:text-slate-200">
+                    <Cpu className="w-3.5 h-3.5 text-violet-400" />
+                    LLM Sharh ({analysis.llmStatus})
+                  </span>
+                  <span className="text-slate-400">{analysis.llmProvider ?? 'API yo‘q'}</span>
+                </div>
+                {analysis.llmSummaryUz ? (
+                  <p className="mt-1 text-slate-700 dark:text-slate-200 leading-relaxed">
+                    {analysis.llmSummaryUz}
+                  </p>
+                ) : analysis.llmError ? (
+                  <p className="mt-1 text-rose-600 dark:text-rose-400 leading-snug">
+                    {analysis.llmError}
+                  </p>
+                ) : (
+                  <p className="mt-1 text-slate-500 dark:text-slate-400">
+                    Quant dvigatel real OHLC asosida hisobladi. LLM sharhi uchun <strong>Analyze Now</strong> bosing.
+                  </p>
+                )}
+              </div>
+
+              {/* Risk Engine Verdict */}
+              {analysis.risk && !analysis.risk.allowed && (
+                <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-2 text-[10.5px] text-amber-700 dark:text-amber-300 flex items-start gap-1.5">
+                  <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>Risk cheklovi: {analysis.risk.blockReasons.join(' · ')}</span>
+                </div>
+              )}
+            </>
+          )}
         </div>
       )}
+
+      {/* TAB 2: DEDUPLICATED CANONICAL SIGNAL FEED (IDENTICAL analysisId!) */}
+      {activeTab === 'signals' && (
+        <div className="flex-1 flex flex-col gap-2 min-h-0 overflow-y-auto pr-0.5">
+          {signals.length === 0 ? (
+            <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] p-4 text-center text-xs text-slate-500">
+              Hali tahlil signallari shakllanmadi. Skaner ishga tushishi yoki <strong>Analyze Now</strong> bosilishini kuting.
+            </div>
+          ) : (
+            signals.map((sig) => {
+              const isSelected = sig.symbol === selectedSymbol;
+              return (
+                <button
+                  key={sig.symbol}
+                  type="button"
+                  onClick={() => {
+                    onSelectSymbol(sig.symbol);
+                    setActiveTab('analyst');
+                  }}
+                  className={`w-full text-left rounded-lg border p-2.5 transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'border-violet-500/60 bg-violet-500/10 dark:bg-violet-500/10'
+                      : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#080D1B] hover:border-sky-400/50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2 font-mono tabular-nums">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-bold text-slate-900 dark:text-white">{sig.symbol}</span>
+                      <span className="text-[10px] text-slate-400">{sig.timeframe}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-bold ${decisionColor(sig.decision)}`}>
+                        {sig.decision}
+                      </span>
+                      <span className="text-[11px] font-semibold text-slate-700 dark:text-slate-200">
+                        {sig.confidence}%
+                      </span>
+                    </div>
+                  </div>
+
+                  {sig.entry !== null && (
+                    <div className="mt-1.5 grid grid-cols-3 gap-1 text-[10px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
+                      <span>E: {formatPrice(sig.entry)}</span>
+                      <span className="text-rose-500 dark:text-rose-400">
+                        SL: {sig.stopLoss !== null ? formatPrice(sig.stopLoss) : '—'}
+                      </span>
+                      <span className="text-emerald-600 dark:text-[#00E5A0]">
+                        TP: {sig.takeProfit !== null ? formatPrice(sig.takeProfit) : '—'}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400 font-mono">
+                    <span className="truncate max-w-[165px]" title={sig.strategyConfirmation}>
+                      {sig.strategyConfirmation}
+                    </span>
+                    <span>{sig.dataSource}</span>
+                  </div>
+                </button>
+              );
+            })
+          )}
+        </div>
+      )}
+
+      {/* TAB 3: SAFE TEST-MODE ORDER TICKET (BACKEND RISK-ENGINE VALIDATED) */}
+      {activeTab === 'order' && (
+        <form onSubmit={handlePlaceOrder} className="flex-1 flex flex-col gap-2.5 text-xs">
+          <div className="rounded-lg border border-sky-500/30 bg-sky-500/10 p-2 text-[10.5px] text-sky-700 dark:text-sky-300 flex items-center justify-between">
+            <span>Xavfsiz TEST rejimi · 8-o‘lchovli Risk Engine</span>
+            <span className="font-mono font-bold">{selectedSymbol}</span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => setSide('LONG')}
+              className={`py-1.5 rounded-lg font-semibold border transition-colors cursor-pointer ${
+                side === 'LONG'
+                  ? 'border-emerald-500 bg-emerald-500/20 text-emerald-700 dark:text-[#00E5A0]'
+                  : 'border-slate-200 dark:border-slate-800 text-slate-500'
+              }`}
+            >
+              BUY / LONG
+            </button>
+            <button
+              type="button"
+              onClick={() => setSide('SHORT')}
+              className={`py-1.5 rounded-lg font-semibold border transition-colors cursor-pointer ${
+                side === 'SHORT'
+                  ? 'border-rose-500 bg-rose-500/20 text-rose-700 dark:text-rose-400'
+                  : 'border-slate-200 dark:border-slate-800 text-slate-500'
+              }`}
+            >
+              SELL / SHORT
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => setOrderType('MARKET')}
+              className={`py-1 rounded-md text-[11px] font-medium border cursor-pointer ${
+                orderType === 'MARKET'
+                  ? 'border-violet-500/60 bg-violet-500/15 text-violet-700 dark:text-violet-300'
+                  : 'border-slate-200 dark:border-slate-800 text-slate-500'
+              }`}
+            >
+              MARKET ({livePrice > 0 ? formatPrice(livePrice) : '—'})
+            </button>
+            <button
+              type="button"
+              onClick={() => setOrderType('LIMIT')}
+              className={`py-1 rounded-md text-[11px] font-medium border cursor-pointer ${
+                orderType === 'LIMIT'
+                  ? 'border-violet-500/60 bg-violet-500/15 text-violet-700 dark:text-violet-300'
+                  : 'border-slate-200 dark:border-slate-800 text-slate-500'
+              }`}
+            >
+              LIMIT
+            </button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 font-mono tabular-nums">
+            <label className="block">
+              <span className="text-[10px] font-sans text-slate-500 dark:text-slate-400">Lot hajmi</span>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={lotSize}
+                onChange={(e) => setLotSize(e.target.value)}
+                className="mt-0.5 w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white"
+              />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-sans text-slate-500 dark:text-slate-400">
+                {orderType === 'LIMIT' ? 'Limit kirish' : 'Joriy narx'}
+              </span>
+              <input
+                type="number"
+                step="any"
+                disabled={orderType === 'MARKET'}
+                value={orderType === 'MARKET' ? (livePrice > 0 ? String(livePrice) : '') : entryInput}
+                onChange={(e) => setEntryInput(e.target.value)}
+                className="mt-0.5 w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white disabled:opacity-60"
+              />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-sans text-rose-400">Stop-Loss</span>
+              <input
+                type="number"
+                step="any"
+                value={slInput}
+                onChange={(e) => setSlInput(e.target.value)}
+                placeholder="Avto ATR SL"
+                className="mt-0.5 w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white"
+              />
+            </label>
+            <label className="block">
+              <span className="text-[10px] font-sans text-emerald-400">Take-Profit</span>
+              <input
+                type="number"
+                step="any"
+                value={tpInput}
+                onChange={(e) => setTpInput(e.target.value)}
+                placeholder="Avto R:R TP"
+                className="mt-0.5 w-full px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white"
+              />
+            </label>
+          </div>
+
+          {orderFeedback && (
+            <div
+              className={`rounded-lg border p-2 text-[11px] flex items-start gap-1.5 ${
+                orderFeedback.type === 'ok'
+                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-[#00E5A0]'
+                  : 'border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300'
+              }`}
+            >
+              {orderFeedback.type === 'ok' ? (
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              ) : (
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              )}
+              <span>{orderFeedback.text}</span>
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={submittingOrder || livePrice <= 0}
+            className="mt-auto w-full py-2 rounded-lg font-semibold bg-gradient-to-r from-violet-600 to-sky-600 hover:from-violet-500 hover:to-sky-500 text-white transition-all cursor-pointer disabled:opacity-50"
+          >
+            {submittingOrder ? 'Risk tekshirilmoqda...' : `${side} Test Order Yuborish`}
+          </button>
+        </form>
+      )}
+
+      {/* Footer Quick Link */}
+      <div className="pt-2 border-t border-slate-200 dark:border-violet-500/15 flex items-center justify-between text-[10.5px]">
+        <button
+          type="button"
+          onClick={() => onNavigate('analyst')}
+          className="text-violet-600 dark:text-violet-300 hover:underline cursor-pointer flex items-center gap-1"
+        >
+          <Activity className="w-3 h-3" />
+          To‘liq AI Analyst Hub
+        </button>
+        <button
+          type="button"
+          onClick={() => onNavigate('backtest')}
+          className="text-sky-600 dark:text-sky-400 hover:underline cursor-pointer"
+        >
+          Backtest Lab →
+        </button>
+      </div>
     </aside>
   );
 };

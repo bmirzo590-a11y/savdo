@@ -49,6 +49,47 @@ import {
   runAutonomousEngineCycle,
   runDemoMultiOrderVerificationSuite,
 } from './server/autonomousEngine';
+import {
+  ALL_TIMEFRAMES,
+  fetchRealOhlc,
+  getMt5ConnectionState,
+  getMt5DataSourcesPayload,
+  getSupportedInstruments,
+  selectMt5BrokerSymbol,
+  sendOrderToMt5Bridge,
+  startMt5BridgeSyncLoop,
+  syncMt5BridgeNow,
+  syncMt5HistoricalData,
+  updateMt5BridgeConfig,
+} from './server/marketDataService';
+import {
+  LlmEvaluatorFn,
+  buildUnifiedSnapshotPayload,
+  closePersistentOrder,
+  createValidatedTestOrder,
+  runRealInstrumentAnalysis,
+  syncMetricsFromUnifiedAnalyses,
+  updatePersistentOrderTargets,
+} from './server/analysisEngine';
+import {
+  isScanCurrentlyRunning,
+  isScannerLoopActive,
+  runScannerPassNow,
+  setScannerControlState,
+  startBackendScannerLoop,
+} from './server/scannerService';
+import {
+  buildAiChatsStatePayload,
+  enqueueAutonomousChatEvent,
+  executeTradeManagerProposal,
+  generateChatResponse,
+  isValidAiChatId,
+} from './server/aiChatEngine';
+import {
+  generateRealLlmText,
+  resolveActiveLlmProvider,
+} from './server/llmProvider';
+import type { Timeframe } from './src/types/trading';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -357,6 +398,82 @@ async function callOpenAiCompatibleJson(systemInstruction: string, userPrompt: s
   const cleaned = raw.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
   return JSON.parse(cleaned);
 }
+
+const VALID_TIMEFRAMES: Timeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'];
+
+function parseTimeframe(raw: unknown, fallback: Timeframe = 'M15'): Timeframe {
+  const s = String(raw || '').toUpperCase() as Timeframe;
+  return VALID_TIMEFRAMES.includes(s) ? s : fallback;
+}
+
+const evaluateAnalysisWithLlm: LlmEvaluatorFn = async (analysis) => {
+  const providerInfo = resolveActiveLlmProvider();
+  if (!providerInfo.configured) {
+    return {
+      status: 'UNCONFIGURED',
+      provider: null,
+      summaryUz: null,
+      error: 'AI API kaliti sozlanmagan (GEMINI_API_KEY yoki LOCAL_LLM_API_KEY mavjud emas).',
+    };
+  }
+
+  const compactContext = {
+    symbol: analysis.symbol,
+    timeframe: analysis.timeframe,
+    dataSource: analysis.dataSource,
+    latestPrice: analysis.latestPrice,
+    decision: analysis.decision,
+    confidence: analysis.confidence,
+    marketRegime: analysis.marketRegime,
+    marketStructure: analysis.marketStructure,
+    candlestickSummary: analysis.candlestickSummary,
+    smcSummary: analysis.smcSummary,
+    mtf: {
+      macroBias: analysis.mtfSummary.macroBias,
+      setupBias: analysis.mtfSummary.setupBias,
+      entryBias: analysis.mtfSummary.entryBias,
+      alignmentPct: analysis.mtfSummary.alignmentPct,
+      conflictDetected: analysis.mtfSummary.conflictDetected,
+    },
+    indicators: analysis.indicators,
+    ensemble: analysis.ensemble,
+    entry: analysis.entry,
+    stopLoss: analysis.stopLoss,
+    takeProfit: analysis.takeProfit,
+    riskRewardRatio: analysis.riskRewardRatio,
+    riskAllowed: analysis.risk?.allowed ?? false,
+    riskBlockReasons: analysis.risk?.blockReasons ?? [],
+  };
+
+  const sysInst = `Siz Trade Killer AI institutional quant tahlilchisisiz. Sizga faqat real OHLC asosida hisoblangan indikatorlar, 18-strategiya Ensemble, MTF, SMC va Risk Engine natijalari beriladi. Hech qachon yangi narx yoki indikator o'ylab topmang. 2–3 qisqa jumlada tabiiy o'zbek tilida professional tahliliy xulosa bering (nima uchun ${analysis.decision} tanlangani, asosiy dalil va asosiy xavf).`;
+  const userPrompt = `Quyidagi hisoblangan tahlil natijasini qisqa, aniq va halol sharhlang:\n${JSON.stringify(compactContext)}`;
+
+  const llmOut = await generateRealLlmText({
+    systemInstruction: sysInst,
+    messages: [{ role: 'user', text: userPrompt }],
+    timeoutMs: 24000,
+  });
+
+  const provName = llmOut.provider
+    ? `${llmOut.provider}${llmOut.model ? ` (${llmOut.model})` : ''}`
+    : null;
+
+  if (!llmOut.ok || !llmOut.text) {
+    return {
+      status: llmOut.generationStatus === 'AI_UNAVAILABLE' ? 'UNCONFIGURED' : 'ERROR',
+      provider: provName,
+      summaryUz: null,
+      error: llmOut.error,
+    };
+  }
+
+  return {
+    status: 'ACTIVE',
+    provider: provName,
+    summaryUz: llmOut.text.slice(0, 700),
+    error: null,
+  };
+};
 
 async function startServer() {
   const app = express();
@@ -1675,6 +1792,658 @@ Qoidalar:
     }
   });
 
+  /* ==================== UNIFIED MT5-ONLY MARKET DATA, DATA SOURCES, AI ANALYSIS, SCANNER, ENSEMBLE & ORDERS ==================== */
+  app.get('/api/data-sources', requireAuth, (_req, res) => {
+    return res.json(getMt5DataSourcesPayload());
+  });
+
+  app.get('/api/mt5/status', requireAuth, (_req, res) => {
+    return res.json({
+      ok: true,
+      connection: getMt5ConnectionState(),
+      dataSources: getMt5DataSourcesPayload(),
+    });
+  });
+
+  app.post('/api/mt5/config', requireAuth, requireCsrf, async (req, res) => {
+    const body = req.body as {
+      bridgeUrl?: string;
+      autoSync?: boolean;
+      pollingIntervalMs?: number;
+      historyTargetYears?: number;
+    };
+    const updated = updateMt5BridgeConfig(body);
+    if (!updated.ok) {
+      return res.status(400).json({ ok: false, error: updated.error });
+    }
+    startMt5BridgeSyncLoop(updated.config?.pollingIntervalMs);
+    const syncResult = await syncMt5BridgeNow();
+    const db = loadMemoryDb();
+    return res.json({
+      ok: true,
+      config: updated.config,
+      sync: syncResult,
+      dataSources: getMt5DataSourcesPayload(),
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/mt5/sync', requireAuth, requireCsrf, async (_req, res) => {
+    const syncResult = await syncMt5BridgeNow();
+    const db = loadMemoryDb();
+    return res.json({
+      ok: syncResult.ok,
+      sync: syncResult,
+      dataSources: getMt5DataSourcesPayload(),
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/mt5/symbols/select', requireAuth, requireCsrf, async (req, res) => {
+    const body = req.body as { symbol?: string; enable?: boolean };
+    const symbol = String(body.symbol || '').trim().slice(0, 40);
+    if (!symbol) {
+      return res.status(400).json({ ok: false, error: 'Broker symbol nomi kiritilishi shart.' });
+    }
+    const result = await selectMt5BrokerSymbol(symbol, body.enable !== false);
+    if (!result.ok) {
+      return res.status(400).json(result);
+    }
+    return res.json({
+      ...result,
+      dataSources: getMt5DataSourcesPayload(),
+    });
+  });
+
+  app.post('/api/mt5/history/sync', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const body = req.body as {
+        symbol?: string;
+        timeframes?: string[];
+        years?: number;
+      };
+      const symbol = String(body.symbol || '').trim().slice(0, 40);
+      if (!symbol) {
+        return res.status(400).json({ ok: false, error: 'Tarix yuklash uchun broker symbol nomi shart.' });
+      }
+      const validTfs = Array.isArray(body.timeframes)
+        ? body.timeframes
+            .map((t) => String(t).trim().toUpperCase())
+            .filter((t): t is Timeframe => (ALL_TIMEFRAMES as string[]).includes(t))
+        : ALL_TIMEFRAMES;
+      const years = typeof body.years === 'number' && Number.isFinite(body.years) ? body.years : undefined;
+
+      const result = await syncMt5HistoricalData({
+        symbol,
+        timeframes: validTfs.length > 0 ? validTfs : ALL_TIMEFRAMES,
+        years,
+      });
+      return res.status(result.ok ? 200 : 400).json({
+        ...result,
+        dataSources: getMt5DataSourcesPayload(),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'MT5 tarixiy ma’lumotlarni yuklash xatosi.';
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  app.post('/api/mt5/order', requireAuth, requireCsrf, async (req, res) => {
+    const body = req.body as {
+      symbol?: string;
+      side?: 'LONG' | 'SHORT';
+      lotSize?: number;
+      stopLoss?: number | null;
+      takeProfit?: number | null;
+    };
+    const symbol = String(body.symbol || '').trim().slice(0, 40);
+    const side = body.side === 'SHORT' ? 'SHORT' : body.side === 'LONG' ? 'LONG' : null;
+    const lotSize = Number(body.lotSize);
+    if (!symbol || !side || !Number.isFinite(lotSize) || lotSize <= 0) {
+      return res.status(400).json({ ok: false, error: 'Symbol, side va lotSize to‘g‘ri kiritilishi shart.' });
+    }
+    const result = await sendOrderToMt5Bridge({
+      symbol,
+      side,
+      lotSize,
+      stopLoss: typeof body.stopLoss === 'number' ? body.stopLoss : null,
+      takeProfit: typeof body.takeProfit === 'number' ? body.takeProfit : null,
+    });
+    return res.status(result.ok ? 200 : 400).json(result);
+  });
+
+  app.get('/api/market/ohlc', requireAuth, async (req, res) => {
+    try {
+      const symbol = String(req.query.symbol || '').trim().slice(0, 40);
+      if (!symbol) {
+        return res.status(400).json({
+          ok: false,
+          source: 'DATA_UNAVAILABLE',
+          connectionStatus: 'DATA UNAVAILABLE',
+          candles: [],
+          error: 'Broker symbol nomi ko‘rsatilmagan.',
+        });
+      }
+      const timeframe = parseTimeframe(req.query.timeframe, 'M15');
+      const limitRaw = Number(req.query.limit);
+      const limit = Number.isFinite(limitRaw) ? Math.max(20, Math.min(25000, Math.round(limitRaw))) : 200;
+      const forceRefresh = req.query.force === '1' || req.query.force === 'true';
+      const allowOfflineHistory = req.query.allowHistory === '1' || req.query.allowHistory === 'true';
+
+      const ohlc = await fetchRealOhlc(symbol, timeframe, {
+        limit,
+        forceRefresh,
+        allowOfflineHistory,
+      });
+      return res.json(ohlc);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'MT5 OHLC yuklash xatosi';
+      return res.status(500).json({
+        ok: false,
+        source: 'DATA_UNAVAILABLE',
+        connectionStatus: 'DATA UNAVAILABLE',
+        candles: [],
+        error: msg,
+      });
+    }
+  });
+
+  app.get('/api/state/unified', requireAuth, (_req, res) => {
+    const db = loadMemoryDb();
+    const sys = getDiskAndSystemMetrics();
+    const providerInfo = resolveActiveLlmProvider();
+    if (!db.llmHealth.lastCheckedAt && !providerInfo.configured) {
+      db.llmHealth = {
+        status: 'UNCONFIGURED',
+        provider: null,
+        lastCheckedAt: null,
+        lastError: 'GEMINI_API_KEY yoki LOCAL_LLM_API_KEY sozlanmagan.',
+      };
+    }
+
+    const unified = buildUnifiedSnapshotPayload(db);
+    return res.json({
+      ...unified,
+      control: db.control,
+      engineMetrics: db.engineMetrics,
+      scannerLoopActive: isScannerLoopActive(),
+      scanInProgress: isScanCurrentlyRunning(),
+      supportedInstruments: getSupportedInstruments(),
+      system: {
+        serverOnline: true,
+        serverUptimeSec: sys.uptimeSec,
+        dbStatus: sys.dbHealthy ? 'HEALTHY' : 'RECOVERED',
+        dbSizeKb: sys.dbSizeKb,
+        memoryUsedPct: sys.memUsedPct,
+        aiConfigured: providerInfo.configured,
+        aiProvider: providerInfo.configured
+          ? `${providerInfo.providerLabel} (${providerInfo.model})`
+          : null,
+      },
+    });
+  });
+
+  app.post('/api/analysis/run', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const body = req.body as {
+        symbol?: string;
+        timeframe?: string;
+        fullMtf?: boolean;
+        useLlm?: boolean;
+      };
+      const symbol = String(body.symbol || '').trim().slice(0, 40);
+      if (!symbol) {
+        return res.status(400).json({ ok: false, error: 'Tahlil uchun broker symbol nomi ko‘rsatilishi shart.' });
+      }
+      const timeframe = parseTimeframe(body.timeframe, 'M15');
+      const fullMtf = body.fullMtf !== false;
+      const useLlm = body.useLlm !== false;
+
+      const db = loadMemoryDb();
+      const analysis = await runRealInstrumentAnalysis({
+        db,
+        symbol,
+        timeframe,
+        fullMtf,
+        forceRefresh: true,
+        llmEvaluator: useLlm ? evaluateAnalysisWithLlm : undefined,
+      });
+      saveMemoryDb(db);
+
+      const unified = buildUnifiedSnapshotPayload(db);
+      return res.json({
+        ok: true,
+        analysis,
+        unified,
+        control: db.control,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'AI tahlilni bajarishda xatolik.';
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  app.post('/api/scanner/start', requireAuth, requireCsrf, async (req, res) => {
+    const tf = parseTimeframe((req.body as { timeframe?: string })?.timeframe, 'M15');
+    const control = setScannerControlState('RUNNING', tf);
+    const db = loadMemoryDb();
+    pushNotification({
+      priority: 'NORMAL',
+      category: 'SCANNER',
+      title: '24/7 Skaner ishga tushirildi',
+      message: `Real OHLC bozor skaneri faollashtirildi (${tf}).`,
+    });
+    void runScannerPassNow({ timeframe: tf, forceRefresh: false });
+    return res.json({
+      ok: true,
+      control,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/scanner/resume', requireAuth, requireCsrf, async (req, res) => {
+    const tf = parseTimeframe((req.body as { timeframe?: string })?.timeframe, 'M15');
+    const control = setScannerControlState('RUNNING', tf);
+    const db = loadMemoryDb();
+    pushNotification({
+      priority: 'NORMAL',
+      category: 'SCANNER',
+      title: '24/7 Skaner davom ettirildi',
+      message: `Bozor skaneri qayta ishga tushirildi (${tf}).`,
+    });
+    void runScannerPassNow({ timeframe: tf, forceRefresh: false });
+    return res.json({
+      ok: true,
+      control,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/scanner/pause', requireAuth, requireCsrf, (_req, res) => {
+    const control = setScannerControlState('PAUSED');
+    const db = loadMemoryDb();
+    pushNotification({
+      priority: 'HIGH',
+      category: 'SCANNER',
+      title: '24/7 Skaner pauzaga qo‘yildi',
+      message: 'Avtomatik bozor skaneri foydalanuvchi tomonidan to‘xtatildi.',
+    });
+    return res.json({
+      ok: true,
+      control,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/scanner/scan-now', requireAuth, requireCsrf, async (req, res) => {
+    try {
+      const tf = parseTimeframe((req.body as { timeframe?: string })?.timeframe, 'M15');
+      const result = await runScannerPassNow({ timeframe: tf, forceRefresh: true });
+      const db = loadMemoryDb();
+      return res.json({
+        ok: true,
+        result,
+        control: db.control,
+        unified: buildUnifiedSnapshotPayload(db),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Skaner ishga tushishida xatolik.';
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  app.post('/api/ensemble/strategies/:id/toggle', requireAuth, requireCsrf, (req, res) => {
+    const id = String(req.params.id || '').trim();
+    const db = loadMemoryDb();
+    const strat = db.ensembleStrategies.find((s) => s.id === id);
+    if (!strat) {
+      return res.status(404).json({ ok: false, error: 'Strategiya Ensemble ro‘yxatida topilmadi.' });
+    }
+    const body = req.body as { enabled?: boolean };
+    strat.enabled = typeof body.enabled === 'boolean' ? body.enabled : !strat.enabled;
+    syncMetricsFromUnifiedAnalyses(db);
+    saveMemoryDb(db);
+    pushNotification({
+      priority: 'NORMAL',
+      category: 'STRATEGY',
+      title: `${strat.name}: ${strat.enabled ? 'FAOL' : 'O‘CHIRILDI'}`,
+      message: `18-strategiya Ensemble tarkibida ${strat.name} holati o‘zgartirildi.`,
+    });
+    return res.json({
+      ok: true,
+      strategy: strat,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/risk/settings', requireAuth, requireCsrf, (req, res) => {
+    const body = req.body as Partial<{
+      dailyMaxLossUsd: number;
+      maxOpenPositions: number;
+      maxDrawdownPct: number;
+      riskPerTradePct: number;
+      maxPortfolioRiskPct: number;
+      maxMarginUsagePct: number;
+      maxCorrelatedExposure: number;
+      maxSpreadPoints: number;
+      maxVolatilityAtrPct: number;
+      testAccountBalanceUsd: number;
+    }>;
+
+    const db = loadMemoryDb();
+    const cur = db.riskSettings;
+
+    const clamp = (val: unknown, min: number, max: number, fallback: number) => {
+      const n = Number(val);
+      if (!Number.isFinite(n)) return fallback;
+      return Math.max(min, Math.min(max, n));
+    };
+
+    db.riskSettings = {
+      dailyMaxLossUsd: Math.round(clamp(body.dailyMaxLossUsd, 50, 100000, cur.dailyMaxLossUsd)),
+      maxOpenPositions: Math.round(clamp(body.maxOpenPositions, 1, 50, cur.maxOpenPositions)),
+      maxDrawdownPct: Number(clamp(body.maxDrawdownPct, 1, 50, cur.maxDrawdownPct).toFixed(2)),
+      riskPerTradePct: Number(clamp(body.riskPerTradePct, 0.1, 10, cur.riskPerTradePct).toFixed(2)),
+      maxPortfolioRiskPct: Number(clamp(body.maxPortfolioRiskPct, 0.5, 30, cur.maxPortfolioRiskPct).toFixed(2)),
+      maxMarginUsagePct: Math.round(clamp(body.maxMarginUsagePct, 5, 95, cur.maxMarginUsagePct)),
+      maxCorrelatedExposure: Math.round(clamp(body.maxCorrelatedExposure, 1, 10, cur.maxCorrelatedExposure)),
+      maxSpreadPoints: Math.round(clamp(body.maxSpreadPoints, 5, 500, cur.maxSpreadPoints)),
+      maxVolatilityAtrPct: Number(clamp(body.maxVolatilityAtrPct, 0.5, 20, cur.maxVolatilityAtrPct).toFixed(2)),
+      testAccountBalanceUsd: Math.round(clamp(body.testAccountBalanceUsd, 500, 10000000, cur.testAccountBalanceUsd)),
+    };
+
+    db.control.maxOpenOrders = db.riskSettings.maxOpenPositions;
+    db.control.maxPortfolioRiskPct = db.riskSettings.maxPortfolioRiskPct;
+    syncMetricsFromUnifiedAnalyses(db);
+    saveMemoryDb(db);
+
+    pushNotification({
+      priority: 'HIGH',
+      category: 'RISK',
+      title: 'Risk Manager sozlamalari saqlandi',
+      message: `Savdo riski: ${db.riskSettings.riskPerTradePct}% · Portfolio: ${db.riskSettings.maxPortfolioRiskPct}% · Kunlik limit: $${db.riskSettings.dailyMaxLossUsd} · Max DD: ${db.riskSettings.maxDrawdownPct}%.`,
+    });
+
+    return res.json({
+      ok: true,
+      riskSettings: db.riskSettings,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.get('/api/orders', requireAuth, (_req, res) => {
+    const db = loadMemoryDb();
+    const unified = buildUnifiedSnapshotPayload(db);
+    return res.json({
+      orders: unified.orders,
+      account: unified.account,
+    });
+  });
+
+  app.get('/api/orders/:id', requireAuth, (req, res) => {
+    const id = String(req.params.id || '').trim();
+    const db = loadMemoryDb();
+    const unified = buildUnifiedSnapshotPayload(db);
+    const order = unified.orders.find((o) => o.id === id);
+    if (!order) {
+      return res.status(404).json({ ok: false, error: 'Buyurtma topilmadi.' });
+    }
+    const linkedAnalysis = db.unifiedAnalyses[order.symbol] ?? null;
+    return res.json({
+      ok: true,
+      order,
+      analysis: linkedAnalysis,
+    });
+  });
+
+  app.post('/api/orders', requireAuth, requireCsrf, (req, res) => {
+    const body = req.body as {
+      symbol?: string;
+      side?: 'LONG' | 'SHORT';
+      orderType?: 'MARKET' | 'LIMIT';
+      entryPrice?: number;
+      stopLoss?: number | null;
+      takeProfit?: number | null;
+      lotSize?: number;
+      leverage?: number;
+      strategyName?: string;
+      analysisId?: string | null;
+    };
+
+    const symbol = String(body.symbol || '').trim().slice(0, 40);
+    const side = body.side === 'SHORT' ? 'SHORT' : body.side === 'LONG' ? 'LONG' : null;
+    if (!symbol || !side) {
+      return res.status(400).json({ ok: false, error: 'Instrument (symbol) va yo‘nalish (LONG/SHORT) majburiy.' });
+    }
+
+    const db = loadMemoryDb();
+    const result = createValidatedTestOrder({
+      db,
+      symbol,
+      side,
+      orderType: body.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET',
+      entryPrice: typeof body.entryPrice === 'number' ? body.entryPrice : undefined,
+      stopLoss: typeof body.stopLoss === 'number' ? body.stopLoss : null,
+      takeProfit: typeof body.takeProfit === 'number' ? body.takeProfit : null,
+      lotSize: typeof body.lotSize === 'number' ? body.lotSize : undefined,
+      leverage: typeof body.leverage === 'number' ? body.leverage : 100,
+      strategyName: body.strategyName ? String(body.strategyName).slice(0, 90) : undefined,
+      analysisId: body.analysisId ? String(body.analysisId).slice(0, 80) : null,
+    });
+
+    if (!result.ok || !result.order) {
+      saveMemoryDb(db);
+      return res.status(400).json({
+        ok: false,
+        error: result.error || 'Buyurtma Risk Engine tomonidan rad etildi.',
+        risk: result.risk,
+      });
+    }
+
+    saveMemoryDb(db);
+    pushNotification({
+      priority: 'HIGH',
+      category: 'POSITION',
+      title: `Test-Mode buyurtma ochildi: ${result.order.symbol} ${result.order.side}`,
+      message: `${result.order.lotSize} lot @ ${result.order.entryPrice} · SL: ${result.order.stopLoss ?? '—'} · TP: ${result.order.takeProfit ?? '—'} · Risk: ${result.order.riskPct}%`,
+      symbol: result.order.symbol,
+    });
+
+    return res.json({
+      ok: true,
+      order: result.order,
+      risk: result.risk,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/orders/:id/close', requireAuth, requireCsrf, (req, res) => {
+    const orderId = String(req.params.id || '').trim();
+    const body = req.body as { closePrice?: number; reasonUz?: string };
+    const db = loadMemoryDb();
+    const result = closePersistentOrder({
+      db,
+      orderId,
+      closePrice: typeof body.closePrice === 'number' ? body.closePrice : undefined,
+      reasonUz: body.reasonUz ? String(body.reasonUz).slice(0, 180) : 'Qo‘lda yopildi',
+    });
+
+    if (!result.ok || !result.order) {
+      return res.status(400).json({ ok: false, error: result.error || 'Pozitsiyani yopib bo‘lmadi.' });
+    }
+
+    saveMemoryDb(db);
+    pushNotification({
+      priority: 'NORMAL',
+      category: 'POSITION',
+      title: `Pozitsiya yopildi: ${result.order.symbol}`,
+      message: `ID: ${result.order.id} · Yakuniy P/L: ${(result.order.realizedPnl ?? 0) >= 0 ? '+' : ''}$${(result.order.realizedPnl ?? 0).toFixed(2)}`,
+      symbol: result.order.symbol,
+    });
+
+    // Automatically enqueue AI Self-Evaluation post-mortem for the closed trade (async, non-blocking)
+    enqueueAutonomousChatEvent({
+      chatId: 'self_evaluation',
+      triggerType: 'TRADE_CLOSED',
+      symbol: result.order.symbol,
+      orderId: result.order.id,
+      dedupKey: `self-eval-close-${result.order.id}`,
+      eventNoteUz: `Yopilgan savdo: ${result.order.symbol} (${result.order.id}) · P/L: $${(result.order.realizedPnl ?? 0).toFixed(2)}`,
+    });
+
+    return res.json({
+      ok: true,
+      order: result.order,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/orders/:id/targets', requireAuth, requireCsrf, (req, res) => {
+    const orderId = String(req.params.id || '').trim();
+    const body = req.body as { stopLoss?: number | null; takeProfit?: number | null };
+    const db = loadMemoryDb();
+    const result = updatePersistentOrderTargets({
+      db,
+      orderId,
+      stopLoss: body.stopLoss === null ? null : typeof body.stopLoss === 'number' ? body.stopLoss : null,
+      takeProfit: body.takeProfit === null ? null : typeof body.takeProfit === 'number' ? body.takeProfit : null,
+    });
+
+    if (!result.ok || !result.order) {
+      return res.status(400).json({ ok: false, error: result.error || 'SL/TP yangilanmadi.' });
+    }
+
+    saveMemoryDb(db);
+    return res.json({
+      ok: true,
+      order: result.order,
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  /* ==================== AUTONOMOUS AI THINKING & 6-CHAT MULTI-AGENT SYSTEM ==================== */
+  app.get('/api/ai-chats/state', requireAuth, (_req, res) => {
+    const db = loadMemoryDb();
+    return res.json({
+      ok: true,
+      ...buildAiChatsStatePayload(db),
+    });
+  });
+
+  app.post('/api/ai-chats/:chatId/ask', requireAuth, requireCsrf, async (req, res) => {
+    const chatId = String(req.params.chatId || '').trim();
+    if (!isValidAiChatId(chatId)) {
+      return res.status(400).json({ ok: false, error: 'Noto‘g‘ri AI chat ID.' });
+    }
+    const body = req.body as {
+      question?: string;
+      symbol?: string;
+      timeframe?: string;
+      orderId?: string;
+      refreshIfStale?: boolean;
+    };
+    const question = typeof body.question === 'string' ? body.question.trim() : '';
+    if (!question) {
+      return res.status(400).json({ ok: false, error: 'Savol matni bo‘sh bo‘lmasligi kerak.' });
+    }
+
+    try {
+      const result = await generateChatResponse({
+        chatId,
+        triggerType: 'USER_QUERY',
+        userQuestion: question.slice(0, 1200),
+        symbol: body.symbol ? String(body.symbol).trim().slice(0, 40) : undefined,
+        timeframe: body.timeframe ? parseTimeframe(body.timeframe, 'M15') : 'M15',
+        orderId: body.orderId ? String(body.orderId).trim().slice(0, 64) : undefined,
+        refreshIfStale: body.refreshIfStale !== false,
+      });
+
+      const db = loadMemoryDb();
+      return res.json({
+        ok: result.ok,
+        userMessage: result.userMessage,
+        aiMessage: result.aiMessage,
+        state: buildAiChatsStatePayload(db),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'AI chat so‘rovida xatolik.';
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  app.post('/api/ai-chats/:chatId/brief', requireAuth, requireCsrf, async (req, res) => {
+    const chatId = String(req.params.chatId || '').trim();
+    if (!isValidAiChatId(chatId)) {
+      return res.status(400).json({ ok: false, error: 'Noto‘g‘ri AI chat ID.' });
+    }
+    const body = req.body as {
+      symbol?: string;
+      timeframe?: string;
+      orderId?: string;
+      refreshIfStale?: boolean;
+    };
+
+    try {
+      const result = await generateChatResponse({
+        chatId,
+        triggerType: 'MANUAL_BRIEF',
+        symbol: body.symbol ? String(body.symbol).trim().slice(0, 40) : undefined,
+        timeframe: body.timeframe ? parseTimeframe(body.timeframe, 'M15') : 'M15',
+        orderId: body.orderId ? String(body.orderId).trim().slice(0, 64) : undefined,
+        refreshIfStale: body.refreshIfStale !== false,
+      });
+
+      const db = loadMemoryDb();
+      return res.json({
+        ok: result.ok,
+        aiMessage: result.aiMessage,
+        state: buildAiChatsStatePayload(db),
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'AI tahliliy xulosa yaratishda xatolik.';
+      return res.status(500).json({ ok: false, error: msg });
+    }
+  });
+
+  app.post('/api/ai-chats/trade-manager/execute', requireAuth, requireCsrf, (req, res) => {
+    const body = req.body as { messageId?: string };
+    const messageId = String(body.messageId || '').trim();
+    if (!messageId) {
+      return res.status(400).json({ ok: false, error: 'messageId ko‘rsatilishi shart.' });
+    }
+    const result = executeTradeManagerProposal({ messageId });
+    const db = loadMemoryDb();
+    if (!result.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: result.error,
+        state: buildAiChatsStatePayload(db),
+        unified: buildUnifiedSnapshotPayload(db),
+      });
+    }
+    return res.json({
+      ok: true,
+      order: result.order,
+      message: result.message,
+      state: buildAiChatsStatePayload(db),
+      unified: buildUnifiedSnapshotPayload(db),
+    });
+  });
+
+  app.post('/api/ai-chats/:chatId/clear', requireAuth, requireCsrf, (req, res) => {
+    const chatId = String(req.params.chatId || '').trim();
+    if (!isValidAiChatId(chatId)) {
+      return res.status(400).json({ ok: false, error: 'Noto‘g‘ri AI chat ID.' });
+    }
+    const db = loadMemoryDb();
+    db.aiChats[chatId] = [];
+    saveMemoryDb(db);
+    return res.json({
+      ok: true,
+      state: buildAiChatsStatePayload(db),
+    });
+  });
+
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
@@ -1691,7 +2460,9 @@ Qoidalar:
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Trade Killer server http://localhost:${PORT} da ishlamoqda`);
+    console.log(`Trade Killer server http://localhost:${PORT} da ishlamoqda (MT5-ONLY rejim)`);
+    startMt5BridgeSyncLoop();
+    startBackendScannerLoop(evaluateAnalysisWithLlm, 45_000);
   });
 }
 

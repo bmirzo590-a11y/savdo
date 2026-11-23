@@ -1,27 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
-  BarChart3,
-  Bell,
-  BookOpen,
-  Bot,
   BrainCircuit,
-  CalendarDays,
-  CandlestickChart,
-  Cpu,
   Database,
   Download,
-  FlaskConical,
-  History,
-  Layers,
-  ListOrdered,
   Lock,
   LogOut,
   MonitorCheck,
   Moon,
-  Network,
   Power,
-  Settings,
+  RefreshCw,
+  Save,
   ShieldAlert,
   ShieldCheck,
   Sun,
@@ -30,7 +19,6 @@ import {
 } from 'lucide-react';
 import {
   INITIAL_PAIRS,
-  INITIAL_POSITIONS,
   INITIAL_RISK_GUARD,
   INITIAL_SERVER_CONFIG,
   INITIAL_STRATEGIES,
@@ -55,6 +43,8 @@ import {
   MarketPair,
   NotificationCategory,
   NotificationPriority,
+  OrderSide,
+  PersistentRiskSettings,
   Position,
   RiskGuardSettings,
   ServerConfig,
@@ -64,12 +54,13 @@ import {
   SystemNotificationRecord,
   Timeframe,
   TradingStyle,
+  UnifiedStateSnapshot,
   ViewId,
 } from './types/trading';
 import { PriceChart } from './components/PriceChart';
 import { PositionsTable } from './components/PositionsTable';
 import { ScannerView } from './components/ScannerView';
-import { ServerBridgeView } from './components/ServerBridgeView';
+import { DataSourcesView } from './components/DataSourcesView';
 import { AiTradingPanel } from './components/AiTradingPanel';
 import { BacktestView } from './components/BacktestView';
 import { AnalystHubView } from './components/AnalystHubView';
@@ -90,6 +81,14 @@ import { MultiOrderManagerView } from './components/MultiOrderManagerView';
 import { ResearchKnowledgeView } from './components/ResearchKnowledgeView';
 import { EconomicCalendarView } from './components/EconomicCalendarView';
 import { SystemMonitorView } from './components/SystemMonitorView';
+import { AiChatCenterView } from './components/AiChatCenterView';
+import {
+  CompactSidebar,
+  RiskSubTab,
+  SectionSubNavBar,
+  SettingsSubTab,
+  getActiveBreadcrumbTitle,
+} from './components/CompactSidebar';
 import { buildStandaloneIndexHtml } from './utils/standaloneHtmlExporter';
 import { generateMt5Candles } from './utils/backtestEngine';
 import { analyzeStrategyBrain, StrategyBrainAnalysis } from './utils/strategyBrain';
@@ -108,53 +107,60 @@ import {
   setAuthSessionMemory,
 } from './utils/apiClient';
 
-const NAV_ITEMS: { id: ViewId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: BarChart3 },
-  { id: 'analyst', label: 'AI Analitik', icon: BrainCircuit },
-  { id: 'scanner', label: '24/7 Skaner', icon: Activity },
-  { id: 'strategies', label: 'Strategiya Markazi', icon: Cpu },
-  { id: 'ensemble', label: 'Strategiya Ansambli', icon: Network },
-  { id: 'candlesticks', label: 'Sham Intellekti', icon: CandlestickChart },
-  { id: 'smc', label: 'Smart Money', icon: Layers },
-  { id: 'memory', label: 'Tarixiy Xotira', icon: Database },
-  { id: 'backtest', label: 'Backtest Lab', icon: History },
-  { id: 'research', label: 'AI Tadqiqot Lab', icon: FlaskConical },
-  { id: 'autotrading', label: 'Avto-Savdo', icon: Bot },
-  { id: 'multiorder', label: 'Multi-Order Manager', icon: ListOrdered },
-  { id: 'risk', label: 'Risk Menejeri', icon: ShieldAlert },
-  { id: 'calendar', label: 'Iqtisodiy Taqvim', icon: CalendarDays },
-  { id: 'journal', label: 'Savdo Jurnali', icon: BookOpen },
-  { id: 'monitor', label: 'Tizim Monitori', icon: MonitorCheck },
-  { id: 'notifications', label: 'Bildirishnomalar', icon: Bell },
-  { id: 'owner', label: 'Owner Markazi', icon: UserCheck },
-  { id: 'settings', label: 'Sozlamalar', icon: Settings },
-];
-
 export default function App() {
   const [darkMode, setDarkMode] = useState(true);
   const [authSession, setAuthSession] = useState<AuthSessionState | null>(null);
   const [lockMessage, setLockMessage] = useState<string | null>(null);
 
   const [activeView, setActiveView] = useState<ViewId>('dashboard');
+  const [riskTab, setRiskTab] = useState<RiskSubTab>('portfolio');
+  const [settingsTab, setSettingsTab] = useState<SettingsSubTab>('terminal');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Live backend status, registry, notifications
+  const handleNavigate = useCallback(
+    (view: ViewId, opts?: { riskTab?: RiskSubTab; settingsTab?: SettingsSubTab }) => {
+      setActiveView(view);
+      if (opts?.riskTab) setRiskTab(opts.riskTab);
+      if (opts?.settingsTab) setSettingsTab(opts.settingsTab);
+    },
+    []
+  );
+
+  const [riskSettingsDraft, setRiskSettingsDraft] = useState<PersistentRiskSettings>({
+    dailyMaxLossUsd: 500,
+    maxOpenPositions: 5,
+    maxDrawdownPct: 5,
+    riskPerTradePct: 1,
+    maxPortfolioRiskPct: 5,
+    maxMarginUsagePct: 40,
+    maxCorrelatedExposure: 2,
+    maxSpreadPoints: 50,
+    maxVolatilityAtrPct: 3.5,
+    testAccountBalanceUsd: 10000,
+  });
+  const [riskSaveBusy, setRiskSaveBusy] = useState(false);
+  const [riskSaveFeedback, setRiskSaveFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  // Live backend status, unified state, registry, notifications
   const [systemStatus, setSystemStatus] = useState<LiveSystemStatusSnapshot | null>(null);
+  const [unifiedState, setUnifiedState] = useState<UnifiedStateSnapshot | null>(null);
+  const [refreshingUnified, setRefreshingUnified] = useState<boolean>(false);
+  const [analyzingSymbol, setAnalyzingSymbol] = useState<string | null>(null);
   const [strategyRegistry, setStrategyRegistry] = useState<StrategyRegistryRecord[]>([]);
   const [notifications, setNotifications] = useState<SystemNotificationRecord[]>([]);
   const [controlBusy, setControlBusy] = useState<string | null>(null);
   const [controlFeedback, setControlFeedback] = useState<string | null>(null);
 
-  // Trading terminal state
+  // Trading terminal state (ZERO fake initial positions — hydrated from real backend persistent DB!)
   const [pairs, setPairs] = useState<MarketPair[]>(INITIAL_PAIRS);
-  const [selectedSymbol, setSelectedSymbol] = useState<string>(INITIAL_PAIRS[0].symbol);
+  const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCUSD');
   const [tradingStyle, setTradingStyle] = useState<TradingStyle>('SCALPING');
-  const [positions, setPositions] = useState<Position[]>(INITIAL_POSITIONS);
+  const [positions, setPositions] = useState<Position[]>([]);
   const [strategies, setStrategies] = useState<StrategyConfig[]>(INITIAL_STRATEGIES);
   const [riskGuard, setRiskGuard] = useState<RiskGuardSettings>(INITIAL_RISK_GUARD);
   const [serverConfig, setServerConfig] = useState<ServerConfig>(INITIAL_SERVER_CONFIG);
 
-  const [baseBalance, setBaseBalance] = useState<number>(24500);
+  const [baseBalance, setBaseBalance] = useState<number>(10000);
   const [mt5Account, setMt5Account] = useState<{
     login: number;
     server: string;
@@ -180,7 +186,7 @@ export default function App() {
   const [aiBacktestTrigger, setAiBacktestTrigger] = useState<Partial<BacktestParams> | null>(null);
   const [chartBrainSnapshot, setChartBrainSnapshot] = useState<StrategyBrainSnapshot | null>(null);
   const [chartBrainAnalysis, setChartBrainAnalysis] = useState<StrategyBrainAnalysis | null>(null);
-  const [activeTimeframe, setActiveTimeframe] = useState<Timeframe>('M5');
+  const [activeTimeframe, setActiveTimeframe] = useState<Timeframe>('M15');
   const [liveCandles, setLiveCandles] = useState<CandlePoint[]>([]);
   const [mtfCandlesByTf, setMtfCandlesByTf] = useState<Partial<Record<Timeframe, CandlePoint[]>>>({});
   const [learningJournal, setLearningJournal] = useState<LearningRecord[]>(() => loadLearningJournal());
@@ -432,72 +438,137 @@ export default function App() {
     }
   };
 
-  // Live poll real MetaTrader 5 account balance, equity, tick prices, and positions
-  useEffect(() => {
-    if (!authSession) return;
-    if (!serverConfig.autoSyncMt5) {
-      setMt5Connected(false);
-      setMt5SyncStatus('offline');
-      return;
-    }
-    let cancelled = false;
-    const syncOnce = async () => {
-      const primaryBase = serverConfig.apiBaseUrl.replace(/\/$/, '');
-      const candidates =
-        primaryBase === 'http://127.0.0.1:8000'
-          ? [primaryBase, 'http://localhost:8000']
-          : [primaryBase];
+  // Hydrate unified backend state (100% MT5-Only broker data, 18 strategies, 24/7 scanner, persistent orders & risk)
+  const applyUnifiedSnapshot = useCallback((snap: UnifiedStateSnapshot) => {
+    setUnifiedState(snap);
 
-      let lastReason: 'https_blocked' | 'offline' | 'mt5_error' = 'offline';
-      let lastDetail = '';
-
-      for (const base of candidates) {
-        try {
-          const controller = new AbortController();
-          const timeout = window.setTimeout(() => controller.abort(), 1600);
-          const res = await fetch(`${base}/api/status`, { signal: controller.signal });
-          window.clearTimeout(timeout);
-          if (!res.ok) {
-            let errText = `HTTP ${res.status}`;
-            try {
-              const errJson = await res.json();
-              if (errJson?.detail) errText = String(errJson.detail);
-            } catch {
-              // ignore non-JSON body
-            }
-            lastReason = 'mt5_error';
-            lastDetail = errText;
-            continue;
-          }
-          const json = await res.json();
-          if (!cancelled && json && json.account) {
-            setMt5Connected(true);
-            setMt5SyncStatus('connected');
-            setMt5ErrorDetail('');
-            applyServerSnapshot(json);
-            return;
-          }
-        } catch {
-          if (typeof window !== 'undefined' && window.location.protocol === 'https:' && base.startsWith('http://')) {
-            lastReason = 'https_blocked';
-          }
+    const backendMt5 = snap.mt5Connection;
+    if (backendMt5) {
+      if (backendMt5.connected) {
+        setMt5Connected(true);
+        setMt5SyncStatus('connected');
+        setMt5ErrorDetail('');
+        if (backendMt5.account) {
+          setMt5Account({
+            login: backendMt5.account.login,
+            server: backendMt5.account.server,
+            balance: backendMt5.account.balance,
+            equity: backendMt5.account.equity,
+            marginFree: backendMt5.account.marginFree,
+            profit: backendMt5.account.profit,
+            realizedToday: backendMt5.account.realizedToday,
+            tradeMode: backendMt5.account.tradeMode,
+            tradeAllowed: backendMt5.account.tradeAllowed,
+            investorReadOnly: backendMt5.account.investorReadOnly,
+          });
+          setBaseBalance(backendMt5.account.balance);
         }
-      }
-
-      if (!cancelled) {
+      } else {
         setMt5Connected(false);
         setMt5Account(null);
-        setMt5SyncStatus(lastReason);
-        setMt5ErrorDetail(lastDetail);
+        setMt5SyncStatus('offline');
+        setMt5ErrorDetail(backendMt5.disconnectReasonUz || backendMt5.lastError || '');
+      }
+    }
+
+    if (Array.isArray(snap.instruments) && snap.instruments.length > 0) {
+      const nextPairs: MarketPair[] = snap.instruments.map((inst) => ({
+        symbol: inst.brokerSymbol || inst.symbol,
+        base: inst.base,
+        quote: inst.quote,
+        price: inst.price && inst.price > 0 ? inst.price : 0,
+        change24h: inst.change24h ?? 0,
+        high24h: inst.high24h ?? (inst.price ?? 0),
+        low24h: inst.low24h ?? (inst.price ?? 0),
+        volume24h: inst.volume24h ?? 0,
+        rsi14: inst.rsi14 ?? 50,
+        trend: inst.trend,
+        assetClass: (inst.assetClass as MarketPair['assetClass']) || 'OTHER',
+        contractSize: inst.contractSize,
+        tickSize: inst.tickSize,
+        point: inst.point,
+        spreadPoints: inst.spreadPoints,
+        tradingSession: inst.tradingSession,
+      }));
+      setPairs(nextPairs);
+      setSelectedSymbol((curr) =>
+        nextPairs.some((p) => p.symbol === curr) ? curr : nextPairs[0].symbol
+      );
+    } else if (backendMt5 && !backendMt5.connected) {
+      // Do not show hardcoded placeholder prices when MT5 has never synced any broker symbols
+      setPairs((prev) =>
+        prev.map((p) => ({
+          ...p,
+          price: 0,
+          change24h: 0,
+          high24h: 0,
+          low24h: 0,
+          volume24h: 0,
+          spreadPoints: 0,
+        }))
+      );
+    }
+
+    // Sync real MT5 / persistent orders from unified backend
+    setPositions(
+      snap.orders.map((ord) => ({
+        id: ord.id,
+        symbol: ord.symbol,
+        side: ord.side,
+        orderType: ord.orderType,
+        entryPrice: ord.entryPrice,
+        markPrice: ord.markPrice,
+        lotSize: ord.lotSize,
+        sizeUsdt: ord.sizeUsdt,
+        leverage: ord.leverage,
+        stopLoss: ord.stopLoss,
+        takeProfit: ord.takeProfit,
+        status: ord.status === 'PENDING' ? 'OPEN' : ord.status,
+        strategyName: ord.strategyName,
+        openedAt: ord.openedAt,
+        closedAt: ord.closedAt,
+        realizedPnl: ord.realizedPnl,
+        profit: ord.profit,
+      }))
+    );
+
+    if (!backendMt5?.connected) {
+      setBaseBalance(snap.account.balance);
+    }
+
+    setRiskGuard((prev) => ({
+      ...prev,
+      dailyMaxLossUsdt: snap.riskSettings.dailyMaxLossUsd,
+      maxOpenPositions: snap.riskSettings.maxOpenPositions,
+      maxDrawdownPct: snap.riskSettings.maxDrawdownPct,
+      riskPerTradePct: snap.riskSettings.riskPerTradePct,
+      maxSpreadPoints: snap.riskSettings.maxSpreadPoints,
+      maxVolatilityAtrPct: snap.riskSettings.maxVolatilityAtrPct,
+    }));
+  }, []);
+
+  // Trigger manual MT5 sync via single unified backend API when user clicks Sync
+  useEffect(() => {
+    if (!authSession || syncTrigger === 0) return;
+    let cancelled = false;
+    const syncViaBackend = async () => {
+      try {
+        const res = await apiJson<{ unified?: UnifiedStateSnapshot }>('/api/mt5/sync', {
+          method: 'POST',
+          body: JSON.stringify({}),
+        });
+        if (!cancelled && res.unified) {
+          applyUnifiedSnapshot(res.unified);
+        }
+      } catch {
+        // Unified state poll handles offline banner cleanly
       }
     };
-    void syncOnce();
-    const timer = window.setInterval(syncOnce, Math.max(1500, serverConfig.pollingIntervalMs || 2000));
+    void syncViaBackend();
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
-  }, [authSession, serverConfig.apiBaseUrl, serverConfig.autoSyncMt5, serverConfig.pollingIntervalMs, syncTrigger]);
+  }, [authSession, syncTrigger, applyUnifiedSnapshot]);
 
   // Notify on MT5 connection / disconnection transitions
   useEffect(() => {
@@ -513,48 +584,175 @@ export default function App() {
           'NORMAL',
           'MT5',
           'MetaTrader 5 Bridge ulandi',
-          `MT5 hisob #${serverConfig.mt5Login} bilan jonli sinxronizatsiya faol.`
+          `MT5 broker serveri bilan jonli sinxronizatsiya faol.`
         );
       } else {
         void pushSystemEvent(
           'CRITICAL',
           'MT5',
           'MT5 ulanishi uzildi',
-          'Lokal MT5 Bridge javob bermayapti. Demo kuzatuv rejimiga o‘tildi.'
+          'MT5 Bridge javob bermayapti. Live tahlil va yangi orderlar xavfsizlik uchun to‘xtatildi.'
         );
       }
     }
-  }, [authSession, mt5Connected, pushSystemEvent, serverConfig.mt5Login]);
+  }, [authSession, mt5Connected, pushSystemEvent]);
 
-  // Continuous multi-instrument analysis & autonomous execution loop is mounted below after execution handlers.
+  const fetchUnifiedState = useCallback(async () => {
+    if (!authSession) return;
+    setRefreshingUnified(true);
+    try {
+      const snap = await apiJson<UnifiedStateSnapshot>('/api/state/unified');
+      applyUnifiedSnapshot(snap);
+    } catch {
+      // Non-blocking poll error
+    } finally {
+      setRefreshingUnified(false);
+    }
+  }, [authSession, applyUnifiedSnapshot]);
 
   useEffect(() => {
-    if (!authSession || !liveTicks || mt5Connected) return;
-    const timer = window.setInterval(() => {
-      setPairs((prevPairs) => {
-        const nextPairs = prevPairs.map((pair) => {
-          const jitter = (Math.random() - 0.495) * pair.price * 0.0009;
-          const nextPrice = Math.max(
-            0.0001,
-            Number((pair.price + jitter).toFixed(pair.price >= 100 ? 2 : 4))
-          );
-          return { ...pair, price: nextPrice };
-        });
-
-        setPositions((prevPos) =>
-          prevPos.map((pos) => {
-            if (pos.status === 'CLOSED') return pos;
-            const matched = nextPairs.find((p) => p.symbol === pos.symbol);
-            return matched ? { ...pos, markPrice: matched.price } : pos;
-          })
-        );
-
-        return nextPairs;
-      });
-    }, 2400);
-
+    if (!authSession) {
+      setUnifiedState(null);
+      return;
+    }
+    void fetchUnifiedState();
+    const timer = window.setInterval(() => void fetchUnifiedState(), 12_000);
     return () => window.clearInterval(timer);
-  }, [authSession, liveTicks, mt5Connected]);
+  }, [authSession, fetchUnifiedState]);
+
+  useEffect(() => {
+    if (unifiedState?.riskSettings) {
+      setRiskSettingsDraft(unifiedState.riskSettings);
+    }
+  }, [unifiedState?.riskSettings]);
+
+  const handleRunUnifiedAnalysis = useCallback(
+    async (symbol: string, timeframe: Timeframe) => {
+      if (!authSession) return;
+      setAnalyzingSymbol(symbol);
+      try {
+        const res = await apiJson<{
+          ok: boolean;
+          unified: UnifiedStateSnapshot;
+        }>('/api/analysis/run', {
+          method: 'POST',
+          body: JSON.stringify({ symbol, timeframe, fullMtf: true, useLlm: true }),
+        });
+        if (res.unified) {
+          applyUnifiedSnapshot(res.unified);
+        }
+        setControlFeedback(`${symbol} (${timeframe}) bo‘yicha real OHLC tahlili bajarildi va bazaga saqlandi.`);
+        window.setTimeout(() => setControlFeedback(null), 4000);
+      } catch (err) {
+        setControlFeedback(err instanceof Error ? err.message : 'AI tahlil xatosi.');
+        window.setTimeout(() => setControlFeedback(null), 5000);
+      } finally {
+        setAnalyzingSymbol(null);
+      }
+    },
+    [authSession, applyUnifiedSnapshot]
+  );
+
+  const handleToggleEnsembleStrategy = useCallback(
+    async (id: string, enabled: boolean) => {
+      if (!authSession) return;
+      try {
+        const res = await apiJson<{ ok: boolean; unified: UnifiedStateSnapshot }>(
+          `/api/ensemble/strategies/${encodeURIComponent(id)}/toggle`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ enabled }),
+          }
+        );
+        if (res.unified) applyUnifiedSnapshot(res.unified);
+      } catch (err) {
+        setControlFeedback(err instanceof Error ? err.message : 'Strategiya holatini o‘zgartirib bo‘lmadi.');
+        window.setTimeout(() => setControlFeedback(null), 4000);
+      }
+    },
+    [authSession, applyUnifiedSnapshot]
+  );
+
+  const handleScannerAction = useCallback(
+    async (action: 'start' | 'pause' | 'resume' | 'scan-now') => {
+      if (!authSession) return;
+      try {
+        const res = await apiJson<{ ok: boolean; unified: UnifiedStateSnapshot }>(
+          `/api/scanner/${action}`,
+          {
+            method: 'POST',
+            body: JSON.stringify({ timeframe: activeTimeframe }),
+          }
+        );
+        if (res.unified) applyUnifiedSnapshot(res.unified);
+      } catch (err) {
+        setControlFeedback(err instanceof Error ? err.message : 'Skaner buyrug‘ida xato.');
+        window.setTimeout(() => setControlFeedback(null), 4000);
+      }
+    },
+    [authSession, activeTimeframe, applyUnifiedSnapshot]
+  );
+
+  const handleSaveRiskSettings = useCallback(
+    async (settings: PersistentRiskSettings): Promise<{ ok: boolean; error?: string }> => {
+      if (!authSession) return { ok: false, error: 'Autentifikatsiya talab qilinadi.' };
+      try {
+        const res = await apiJson<{ ok: boolean; unified: UnifiedStateSnapshot }>('/api/risk/settings', {
+          method: 'POST',
+          body: JSON.stringify(settings),
+        });
+        if (res.unified) applyUnifiedSnapshot(res.unified);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Risk sozlamalari saqlanmadi.' };
+      }
+    },
+    [authSession, applyUnifiedSnapshot]
+  );
+
+  const handleSubmitUnifiedOrder = useCallback(
+    async (payload: {
+      symbol: string;
+      side: OrderSide;
+      orderType: 'MARKET' | 'LIMIT';
+      lotSize: number;
+      entryPrice?: number;
+      stopLoss: number | null;
+      takeProfit: number | null;
+      analysisId?: string | null;
+      strategyName?: string;
+    }): Promise<{ ok: boolean; error?: string }> => {
+      if (!authSession) return { ok: false, error: 'Autentifikatsiya talab qilinadi.' };
+      try {
+        const res = await apiJson<{ ok: boolean; unified: UnifiedStateSnapshot }>('/api/orders', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        if (res.unified) applyUnifiedSnapshot(res.unified);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Buyurtma rad etildi.' };
+      }
+    },
+    [authSession, applyUnifiedSnapshot]
+  );
+
+  const handleCloseUnifiedOrder = useCallback(
+    async (orderId: string): Promise<{ ok: boolean; error?: string }> => {
+      if (!authSession) return { ok: false, error: 'Autentifikatsiya talab qilinadi.' };
+      try {
+        const res = await apiJson<{ ok: boolean; unified: UnifiedStateSnapshot }>(
+          `/api/orders/${encodeURIComponent(orderId)}/close`,
+          { method: 'POST', body: JSON.stringify({ reasonUz: 'Dashboarddan yopildi' }) }
+        );
+        if (res.unified) applyUnifiedSnapshot(res.unified);
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'Pozitsiyani yopib bo‘lmadi.' };
+      }
+    },
+    [authSession, applyUnifiedSnapshot]
+  );
 
   const activePair = useMemo(
     () => pairs.find((p) => p.symbol === selectedSymbol) ?? pairs[0],
@@ -566,40 +764,46 @@ export default function App() {
     setLearningJournal((prev) => syncClosedPositionsToJournal(prev, positions));
   }, [positions]);
 
-  // Fetch multi-timeframe MT5 candles when local bridge is connected
+  // Fetch multi-timeframe MT5 candles strictly via unified backend API (/api/market/ohlc)
   useEffect(() => {
-    if (!authSession || !mt5Connected) {
+    if (!authSession || !mt5Connected || !selectedSymbol) {
       setMtfCandlesByTf({});
       return;
     }
     let cancelled = false;
+    const tfs: Timeframe[] = ['M5', 'M15', 'H1', 'H4', 'D1'];
     const loadMtf = async () => {
-      const base = serverConfig.apiBaseUrl.replace(/\/$/, '');
       try {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 2200);
-        const res = await fetch(
-          `${base}/api/mtf?symbol=${encodeURIComponent(selectedSymbol)}&count=120`,
-          { signal: controller.signal }
+        const entries = await Promise.all(
+          tfs.map(async (tf) => {
+            try {
+              const res = await apiJson<{ ok: boolean; candles?: CandlePoint[] }>(
+                `/api/market/ohlc?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${tf}&limit=120`
+              );
+              return [tf, res.ok && Array.isArray(res.candles) ? res.candles : []] as const;
+            } catch {
+              return [tf, [] as CandlePoint[]] as const;
+            }
+          })
         );
-        window.clearTimeout(timeout);
-        if (!res.ok) return;
-        const json = await res.json();
-        const tfMap = json?.candlesByTf ?? json?.timeframes;
-        if (!cancelled && tfMap && typeof tfMap === 'object') {
-          setMtfCandlesByTf(tfMap as Partial<Record<Timeframe, CandlePoint[]>>);
+        if (!cancelled) {
+          const nextMap: Partial<Record<Timeframe, CandlePoint[]>> = {};
+          for (const [tf, list] of entries) {
+            if (list.length >= 20) nextMap[tf] = list;
+          }
+          setMtfCandlesByTf(nextMap);
         }
       } catch {
-        // Fallback to client MTF derivation when /api/mtf isn't running
+        // Non-blocking MTF error
       }
     };
     void loadMtf();
-    const timer = window.setInterval(loadMtf, 15000);
+    const timer = window.setInterval(loadMtf, 20_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [authSession, mt5Connected, selectedSymbol, serverConfig.apiBaseUrl]);
+  }, [authSession, mt5Connected, selectedSymbol]);
 
   const allPairBrains = useMemo(() => {
     const tf: Timeframe = activeTimeframe;
@@ -1946,176 +2150,32 @@ export default function App() {
     );
   }
 
-  const currentTitle = NAV_ITEMS.find((n) => n.id === activeView)?.label ?? 'Dashboard';
+  const currentTitle = getActiveBreadcrumbTitle(activeView, riskTab, settingsTab);
   const unreadNotifs = notifications.filter((n) => !n.acknowledged).length;
   const totalPnlAll = metrics.realizedToday + metrics.openPnl;
-  const strategiesCount = systemStatus?.strategiesCount;
+  const openOrdersBadgeCount = mt5Connected
+    ? metrics.openCount
+    : unifiedState?.account.openCount ?? metrics.openCount;
 
   return (
     <div className="min-h-screen flex bg-slate-50 dark:bg-[#050811] tk-canvas-bg text-slate-900 dark:text-slate-100">
-      {/* Desktop Compact Institutional Neon Sidebar */}
-      <aside className="hidden lg:flex w-56 shrink-0 flex-col justify-between border-r border-slate-200 dark:border-violet-500/20 bg-white dark:bg-[#080D1B] sticky top-0 h-screen">
-        <div className="flex flex-col min-h-0 flex-1">
-          <div className="h-12 px-4 flex items-center justify-between border-b border-slate-200 dark:border-violet-500/20 shrink-0">
-            <a
-              href="#top"
-              onClick={(e) => {
-                e.preventDefault();
-                setActiveView('dashboard');
-              }}
-              className="font-display text-sm font-bold tracking-tight text-slate-900 dark:bg-gradient-to-r dark:from-violet-400 dark:via-sky-400 dark:to-[#00E5A0] dark:bg-clip-text dark:text-transparent whitespace-nowrap shrink-0"
-            >
-              Trade Killer AI
-            </a>
-            <span className="text-[10px] font-mono font-semibold text-sky-500 dark:text-sky-400">
-              AI
-            </span>
-          </div>
-
-          <nav className="p-2 space-y-0.5 overflow-y-auto flex-1" aria-label="Asosiy menyu">
-            {NAV_ITEMS.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeView === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => setActiveView(item.id)}
-                  className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-[11.5px] font-medium rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
-                    isActive
-                      ? 'bg-slate-900 text-white dark:bg-gradient-to-r dark:from-violet-600/25 dark:to-sky-600/20 dark:text-sky-300 dark:border dark:border-violet-400/40'
-                      : 'text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-violet-500/10 hover:text-slate-900 dark:hover:text-white'
-                  }`}
-                >
-                  <span className="flex items-center gap-2 truncate">
-                    <Icon
-                      className={`w-3.5 h-3.5 shrink-0 ${
-                        isActive ? 'text-sky-400' : 'text-slate-400 dark:text-slate-500'
-                      }`}
-                    />
-                    <span className="truncate">{item.label}</span>
-                  </span>
-                  {item.id === 'notifications' && unreadNotifs > 0 && (
-                    <span className="font-mono tabular-nums text-[10.5px] font-bold text-violet-500 dark:text-violet-400">
-                      {unreadNotifs}
-                    </span>
-                  )}
-                  {item.id === 'multiorder' && metrics.openCount > 0 && (
-                    <span className="font-mono tabular-nums text-[10.5px] font-bold text-sky-500 dark:text-sky-400">
-                      {metrics.openCount}
-                    </span>
-                  )}
-                  {item.id === 'owner' && authSession.ownerVerified && (
-                    <ShieldCheck className="w-3.5 h-3.5 text-[#00E5A0] shrink-0" />
-                  )}
-                </button>
-              );
-            })}
-          </nav>
-        </div>
-
-        <div className="p-2.5 border-t border-slate-200 dark:border-violet-500/20 space-y-2 bg-slate-50/70 dark:bg-[#060A15]">
-          <div className="flex items-center justify-between text-[10.5px] text-slate-500 dark:text-slate-400 px-1 font-mono tabular-nums">
-            <span className={mt5Connected ? 'text-[#00E5A0]' : 'text-amber-400'}>
-              {mt5Connected ? `MT5 #${serverConfig.mt5Login}` : 'MT5 Demo'}
-            </span>
-            <span>{authSession.autoLockMinutes}m qulf</span>
-          </div>
-          <div className="grid grid-cols-2 gap-1.5">
-            <button
-              type="button"
-              onClick={() => void handleLockSystem()}
-              className="flex items-center justify-center gap-1 py-1.5 px-2 text-[11px] font-semibold rounded-md border border-violet-500/35 bg-violet-500/10 text-violet-700 dark:text-violet-300 hover:bg-violet-500/20 cursor-pointer whitespace-nowrap"
-            >
-              <Lock className="w-3 h-3" />
-              <span>Qulflash</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleLogout()}
-              className="flex items-center justify-center gap-1 py-1.5 px-2 text-[11px] font-semibold rounded-md border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-sky-400/50 hover:text-white cursor-pointer whitespace-nowrap"
-            >
-              <LogOut className="w-3 h-3" />
-              <span>Chiqish</span>
-            </button>
-          </div>
-        </div>
-      </aside>
-
-      {/* Tablet & Mobile Collapsible Sidebar Drawer */}
-      {mobileMenuOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden flex">
-          <div className="fixed inset-0 bg-black/80 backdrop-blur-xs" onClick={() => setMobileMenuOpen(false)} />
-          <aside className="relative z-10 w-64 max-w-[82vw] bg-white dark:bg-[#080D1B] border-r border-slate-200 dark:border-violet-500/25 flex flex-col justify-between p-3.5">
-            <div className="flex flex-col min-h-0 flex-1">
-              <div className="flex items-center justify-between pb-3 mb-2 border-b border-slate-200 dark:border-violet-500/20">
-                <span className="font-display text-sm font-bold text-slate-900 dark:bg-gradient-to-r dark:from-violet-400 dark:via-sky-400 dark:to-[#00E5A0] dark:bg-clip-text dark:text-transparent">
-                  Trade Killer AI
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setMobileMenuOpen(false)}
-                  className="p-1 text-slate-500 hover:text-slate-900 dark:hover:text-white cursor-pointer"
-                  aria-label="Menyuni yopish"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              <nav className="space-y-0.5 overflow-y-auto flex-1">
-                {NAV_ITEMS.map((item) => {
-                  const Icon = item.icon;
-                  const isActive = activeView === item.id;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => {
-                        setActiveView(item.id);
-                        setMobileMenuOpen(false);
-                      }}
-                      className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-medium rounded-lg whitespace-nowrap cursor-pointer ${
-                        isActive
-                          ? 'bg-slate-900 text-white dark:bg-violet-500/20 dark:text-sky-300 dark:border dark:border-violet-400/40'
-                          : 'text-slate-600 dark:text-slate-400'
-                      }`}
-                    >
-                      <span className="flex items-center gap-2.5">
-                        <Icon className="w-3.5 h-3.5 shrink-0" />
-                        <span>{item.label}</span>
-                      </span>
-                      {item.id === 'notifications' && unreadNotifs > 0 && (
-                        <span className="font-mono text-[11px] text-violet-400">{unreadNotifs}</span>
-                      )}
-                    </button>
-                  );
-                })}
-              </nav>
-            </div>
-            <div className="pt-3 border-t border-slate-200 dark:border-violet-500/20 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  void handleLockSystem();
-                }}
-                className="py-2 text-xs font-semibold rounded-lg border border-violet-500/40 text-violet-400"
-              >
-                Qulflash
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMobileMenuOpen(false);
-                  void handleLogout();
-                }}
-                className="py-2 text-xs font-semibold rounded-lg border border-slate-700 text-slate-300"
-              >
-                Chiqish
-              </button>
-            </div>
-          </aside>
-        </div>
-      )}
+      {/* Compact 10-Item Institutional Neon Sidebar + Mobile Drawer */}
+      <CompactSidebar
+        activeView={activeView}
+        riskTab={riskTab}
+        settingsTab={settingsTab}
+        unreadNotifs={unreadNotifs}
+        openOrdersCount={openOrdersBadgeCount}
+        ownerVerified={authSession.ownerVerified}
+        mt5Connected={mt5Connected}
+        mt5Login={serverConfig.mt5Login}
+        autoLockMinutes={authSession.autoLockMinutes}
+        mobileMenuOpen={mobileMenuOpen}
+        onCloseMobileMenu={() => setMobileMenuOpen(false)}
+        onNavigate={handleNavigate}
+        onLockSystem={() => void handleLockSystem()}
+        onLogout={() => void handleLogout()}
+      />
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
@@ -2123,268 +2183,203 @@ export default function App() {
         <TopTerminalBar
           currentTitle={currentTitle}
           status={systemStatus}
+          unifiedState={unifiedState}
           mt5Connected={mt5Connected}
           mt5Login={serverConfig.mt5Login}
           unreadNotifs={unreadNotifs}
           darkMode={darkMode}
+          refreshing={refreshingUnified}
+          onRefreshAll={() => void fetchUnifiedState()}
           onToggleDarkMode={() => setDarkMode((prev) => !prev)}
           onOpenMobileMenu={() => setMobileMenuOpen(true)}
-          onNavigate={setActiveView}
+          onNavigate={handleNavigate}
           onLockSystem={() => void handleLockSystem()}
         />
 
         {/* Main Viewport */}
-        <main className="p-3 sm:p-4 max-w-[1600px] w-full mx-auto space-y-3.5">
+        <main className="p-3 sm:p-4 max-w-[1600px] w-full mx-auto space-y-3">
+          <SectionSubNavBar
+            activeView={activeView}
+            riskTab={riskTab}
+            settingsTab={settingsTab}
+            onNavigate={handleNavigate}
+          />
           {controlFeedback && (
-            <div className="px-3.5 py-2 rounded-lg border border-amber-500/40 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-300 flex items-center justify-between gap-3">
+            <div className="px-3.5 py-2 rounded-lg border border-sky-500/40 bg-sky-500/10 text-xs text-sky-700 dark:text-sky-300 flex items-center justify-between gap-3">
               <span>{controlFeedback}</span>
               <button
                 type="button"
                 onClick={() => setControlFeedback(null)}
-                className="text-amber-500 hover:text-white cursor-pointer"
+                className="text-sky-500 hover:text-white cursor-pointer"
               >
                 <X className="w-3.5 h-3.5" />
               </button>
             </div>
           )}
 
-          {/* 1. MAIN INSTITUTIONAL DASHBOARD */}
-          {activeView === 'dashboard' && (
-            <>
-              {!mt5Connected && showConnectionNotice && (
-                <div className="rounded-xl border border-violet-500/35 bg-white dark:bg-[#0B1120] tk-glass-purple px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="font-medium text-violet-700 dark:text-sky-300 max-w-3xl">
-                    {mt5SyncStatus === 'https_blocked'
-                      ? 'HTTPS sahifadan lokal MT5 Bridge (http://127.0.0.1:8000) bloklangan — Demo simulyatsiya faol'
-                      : mt5SyncStatus === 'mt5_error'
-                        ? `MT5 Bridge xatosi: ${mt5ErrorDetail}`
-                        : 'MT5 ulanmagan (Demo simulyatsiya faol) — Sozlamalar bo‘limidan mt5_bridge.py ni ishga tushiring'}
+          {/* 1. COMPACT NEON INSTITUTIONAL DASHBOARD (SINGLE UNIFIED BACKEND SOURCE OF TRUTH) */}
+          {activeView === 'dashboard' && (() => {
+            const selectedUnified = unifiedState?.analysesBySymbol[selectedSymbol] ?? null;
+            const acct = unifiedState?.account;
+            const dailyPnlVal = mt5Connected ? totalPnlAll : acct?.dailyPnl ?? 0;
+            const openPosCount = mt5Connected ? metrics.openCount : acct?.openCount ?? 0;
+            const maxPosLimit = unifiedState?.riskSettings.maxOpenPositions ?? riskGuard.maxOpenPositions;
+            const portRiskVal = acct?.portfolioRiskPct ?? 0;
+            const maxPortRisk = unifiedState?.riskSettings.maxPortfolioRiskPct ?? 5;
+            const liveInstCount = unifiedState
+              ? unifiedState.instruments.filter((i) => i.dataSource !== 'DATA_UNAVAILABLE').length
+              : 0;
+
+            return (
+              <>
+                {/* TOP 6 COMPACT REAL KPI METRICS (NO DUPLICATE STACKED CARDS) */}
+                <section className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-2.5">
+                  <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-3">
+                    <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Instrumentlar</div>
+                    <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+                      {unifiedState?.instruments.length ?? pairs.length}
+                    </div>
+                    <div className="text-[10px] font-mono text-sky-500 dark:text-sky-400 truncate">
+                      {liveInstCount} jonli OHLC
+                    </div>
                   </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setLiveTicks((prev) => !prev)}
-                      className={`px-2.5 py-1 text-[11px] font-medium rounded border cursor-pointer transition-colors ${
-                        liveTicks
-                          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
-                          : 'border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400'
+
+                  <div className="rounded-xl border border-slate-200 dark:border-violet-500/30 bg-white dark:bg-[#0D1426] p-3">
+                    <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Faol strategiyalar</div>
+                    <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-violet-600 dark:text-violet-400">
+                      {unifiedState?.activeStrategiesCount ?? 0} / {unifiedState?.totalStrategiesCount ?? 18}
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-500 truncate">
+                      18-strategiya Ensemble
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-sky-500/25 bg-white dark:bg-[#0D1426] p-3">
+                    <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Signallar</div>
+                    <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-sky-600 dark:text-sky-400">
+                      {(unifiedState?.signalCounts.buy ?? 0) + (unifiedState?.signalCounts.sell ?? 0)}
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-500 truncate">
+                      {unifiedState?.signalCounts.buy ?? 0}B · {unifiedState?.signalCounts.sell ?? 0}S · {unifiedState?.signalCounts.wait ?? 0}W
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-3">
+                    <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Ochiq pozitsiyalar</div>
+                    <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
+                      {openPosCount} / {maxPosLimit}
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-500 truncate">
+                      Pending: {acct?.pendingCount ?? 0} · Yopiq: {acct?.closedCount ?? 0}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-3">
+                    <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Kunlik P/L</div>
+                    <div
+                      className={`mt-0.5 text-base font-bold font-mono tabular-nums ${
+                        dailyPnlVal >= 0 ? 'text-emerald-600 dark:text-[#00E5A0]' : 'text-rose-500'
                       }`}
                     >
-                      Demo oqim: {liveTicks ? 'Faol' : 'Pauza'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSyncTrigger((n) => n + 1)}
-                      className="px-2.5 py-1 text-[11px] rounded border border-slate-200 dark:border-violet-500/30 text-slate-600 dark:text-slate-300 hover:border-sky-400 cursor-pointer"
+                      {dailyPnlVal >= 0 ? '+' : ''}
+                      {formatCurrency(dailyPnlVal)}
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-500 truncate">
+                      Equity: {formatCurrency(mt5Connected ? metrics.totalEquity : acct?.equity ?? baseBalance)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-3">
+                    <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Portfolio Risk</div>
+                    <div
+                      className={`mt-0.5 text-base font-bold font-mono tabular-nums ${
+                        portRiskVal <= maxPortRisk && !tradingBlocked
+                          ? 'text-emerald-600 dark:text-[#00E5A0]'
+                          : 'text-rose-500'
+                      }`}
                     >
-                      Qayta tekshirish
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setActiveView('settings')}
-                      className="px-2.5 py-1 text-[11px] font-semibold rounded bg-gradient-to-r from-violet-600 to-sky-500 text-white cursor-pointer"
-                    >
-                      MT5 Sozlash
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowConnectionNotice(false)}
-                      aria-label="Yopish"
-                      className="p-1 text-slate-400 hover:text-white cursor-pointer"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
+                      {portRiskVal.toFixed(2)}%
+                    </div>
+                    <div className="text-[10px] font-mono text-slate-500 truncate">
+                      Limit: {maxPortRisk}% · -${unifiedState?.riskSettings.dailyMaxLossUsd ?? riskGuard.dailyMaxLossUsdt}
+                    </div>
                   </div>
-                </div>
-              )}
+                </section>
 
-              {/* 8 Compact Top Institutional KPI Tiles */}
-              <section className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-8 gap-2.5">
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Instrumentlar</div>
-                  <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                    {pairs.length}
+                {/* CENTER REAL OHLC CHART (8 COLS) + RIGHT UNIFIED AI ANALYST / SIGNALS / TEST ORDER (4 COLS) */}
+                <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 items-stretch">
+                  <div className="xl:col-span-8 min-w-0">
+                    <PriceChart
+                      pairs={pairs}
+                      selectedSymbol={selectedSymbol}
+                      onSelectSymbol={setSelectedSymbol}
+                      serverConfig={serverConfig}
+                      tradingStyle={tradingStyle}
+                      onChangeStyle={handleStyleChange}
+                      timeframe={activeTimeframe}
+                      onTimeframeChange={setActiveTimeframe}
+                      onBrainUpdate={setChartBrainSnapshot}
+                      onFullBrainUpdate={setChartBrainAnalysis}
+                      onCandlesUpdate={setLiveCandles}
+                      tradeLevels={
+                        selectedUnified &&
+                        selectedUnified.status === 'OK' &&
+                        selectedUnified.entry !== null &&
+                        selectedUnified.stopLoss !== null &&
+                        selectedUnified.takeProfit !== null
+                          ? {
+                              entry: selectedUnified.entry,
+                              stopLoss: selectedUnified.stopLoss,
+                              takeProfit: selectedUnified.takeProfit,
+                              action: selectedUnified.decision,
+                            }
+                          : null
+                      }
+                    />
                   </div>
-                  <div className="text-[10px] font-mono text-sky-500 dark:text-sky-400 truncate">
-                    {systemStatus?.control.instrumentsScanned ?? pairs.length} skaner
-                  </div>
-                </div>
 
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Strategiyalar</div>
-                  <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                    {strategiesCount?.total ?? strategyRegistry.length}
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-500 truncate">Bazadagi jami</div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 dark:border-sky-500/25 bg-white dark:bg-[#0B1120] tk-glass-blue p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Tasdiqlangan</div>
-                  <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-sky-600 dark:text-sky-400">
-                    {strategiesCount?.approved ?? 0}
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-500 truncate">Owner ruxsati</div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/30 bg-white dark:bg-[#0B1120] tk-glass-purple p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Faol strategiya</div>
-                  <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-violet-600 dark:text-violet-400">
-                    {strategiesCount?.active ?? 0}
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-500 truncate">
-                    Kutilmoqda: {strategiesCount?.pending ?? 0}
+                  <div className="xl:col-span-4 min-w-0">
+                    <LiveSignalRail
+                      pairs={pairs}
+                      selectedSymbol={selectedSymbol}
+                      timeframe={activeTimeframe}
+                      unifiedState={unifiedState}
+                      analyzingSymbol={analyzingSymbol}
+                      refreshing={refreshingUnified}
+                      onSelectSymbol={setSelectedSymbol}
+                      onRunAnalysis={handleRunUnifiedAnalysis}
+                      onRefreshUnified={fetchUnifiedState}
+                      onSubmitOrder={handleSubmitUnifiedOrder}
+                      onNavigate={setActiveView}
+                    />
                   </div>
                 </div>
 
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Ochiq orderlar</div>
-                  <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                    {metrics.openCount} / {systemStatus?.control.maxOpenOrders ?? riskGuard.maxOpenPositions}
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveView('multiorder')}
-                    className="text-[10px] font-mono text-sky-500 hover:underline cursor-pointer"
-                  >
-                    Multi-Order →
-                  </button>
-                </div>
+                {/* BOTTOM COMPACT 5-MODULE NEON GRID */}
+                <DashboardBottomGrid
+                  selectedSymbol={selectedSymbol}
+                  unifiedState={unifiedState}
+                  mt5Connected={mt5Connected}
+                  onSelectSymbol={setSelectedSymbol}
+                  onToggleEnsembleStrategy={handleToggleEnsembleStrategy}
+                  onScannerAction={handleScannerAction}
+                  onSaveRiskSettings={handleSaveRiskSettings}
+                  onCloseOrder={handleCloseUnifiedOrder}
+                  onNavigate={setActiveView}
+                />
+              </>
+            );
+          })()}
 
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Bugungi P/L</div>
-                  <div
-                    className={`mt-0.5 text-base font-bold font-mono tabular-nums ${
-                      totalPnlAll >= 0 ? 'text-emerald-600 dark:text-[#00E5A0]' : 'text-rose-500'
-                    }`}
-                  >
-                    {totalPnlAll >= 0 ? '+' : ''}
-                    {formatCurrency(totalPnlAll)}
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-500 truncate">
-                    Ochiq: {metrics.openPnl >= 0 ? '+' : ''}{formatCurrency(metrics.openPnl)}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">
-                    {mt5Connected ? 'MT5 Equity' : 'Umumiy Kapital'}
-                  </div>
-                  <div className="mt-0.5 text-base font-bold font-mono tabular-nums text-slate-900 dark:text-white">
-                    {formatCurrency(metrics.totalEquity)}
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-500 truncate">
-                    Erkin: {formatCurrency(metrics.availableBalance)}
-                  </div>
-                </div>
-
-                <div className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-3">
-                  <div className="text-[10.5px] text-slate-500 dark:text-slate-400">Portfolio risk</div>
-                  <div
-                    className={`mt-0.5 text-base font-bold font-mono tabular-nums ${
-                      decisionReport.riskEvaluation.overallAllowed && !tradingBlocked
-                        ? 'text-emerald-600 dark:text-[#00E5A0]'
-                        : 'text-rose-500'
-                    }`}
-                  >
-                    {(systemStatus?.engineMetrics?.currentPortfolioRiskPct ?? decisionReport.riskEvaluation.riskPct).toFixed(2)}%
-                  </div>
-                  <div className="text-[10px] font-mono text-slate-500 truncate">
-                    Limit: {systemStatus?.control.maxPortfolioRiskPct ?? 5}% · -${riskGuard.dailyMaxLossUsdt}
-                  </div>
-                </div>
-              </section>
-
-              {/* CENTER (Candlestick Chart + AI Brain Panel) & RIGHT (AI Capabilities + Live Signal Feed / OrderPanel) */}
-              <div className="grid grid-cols-1 xl:grid-cols-12 gap-3.5 items-stretch">
-                <div className="xl:col-span-8 flex flex-col gap-3.5 min-w-0">
-                  <PriceChart
-                    pairs={pairs}
-                    selectedSymbol={selectedSymbol}
-                    onSelectSymbol={setSelectedSymbol}
-                    serverConfig={serverConfig}
-                    tradingStyle={tradingStyle}
-                    onChangeStyle={handleStyleChange}
-                    timeframe={activeTimeframe}
-                    onTimeframeChange={setActiveTimeframe}
-                    onBrainUpdate={setChartBrainSnapshot}
-                    onFullBrainUpdate={setChartBrainAnalysis}
-                    onCandlesUpdate={setLiveCandles}
-                    tradeLevels={{
-                      entry: activePair.price,
-                      stopLoss: decisionReport.riskEvaluation.dynamicStopLoss,
-                      takeProfit: decisionReport.riskEvaluation.takeProfit,
-                      action: decisionReport.finalAction,
-                    }}
-                  />
-
-                  <AiBrainStrip
-                    decisionReport={decisionReport}
-                    currentPrice={activePair.price}
-                    systemStatus={systemStatus}
-                    registry={strategyRegistry}
-                    learningRecordsCount={learningJournal.length}
-                    dailyPnlUsd={totalPnlAll}
-                    dailyMaxLossUsd={riskGuard.dailyMaxLossUsdt}
-                    mt5Connected={mt5Connected}
-                    onNavigate={setActiveView}
-                  />
-                </div>
-
-                <div className="xl:col-span-4 min-w-0">
-                  <LiveSignalRail
-                    pairs={pairs}
-                    selectedSymbol={selectedSymbol}
-                    tradingStyle={tradingStyle}
-                    onSelectSymbol={setSelectedSymbol}
-                    allPairBrains={allPairBrains}
-                    systemStatus={systemStatus}
-                    availableBalance={metrics.availableBalance}
-                    equity={metrics.totalEquity}
-                    riskEvaluation={decisionReport.riskEvaluation}
-                    tradingBlocked={tradingBlocked}
-                    mt5Connected={mt5Connected}
-                    onPlaceOrder={handlePlaceOrder}
-                    onNavigate={setActiveView}
-                  />
-                </div>
-              </div>
-
-              {/* LIVE AI ANALYSIS, EXECUTION METRICS & DIAGNOSTICS STRIP */}
-              <AutonomousDiagnosticsPanel
-                status={systemStatus}
-                aiBusy={aiEngineBusy}
-                lastAiBriefUz={lastAiBriefUz}
-                lastAiProvider={lastAiProvider}
-                lastAiError={lastAiError}
-                onRunFullAiCycle={() => void runAutonomousCycle(true)}
-                onSelectSymbol={setSelectedSymbol}
-                onNavigate={setActiveView}
-                compact
-              />
-
-              {/* BOTTOM: 7 Institutional Command Modules */}
-              <DashboardBottomGrid
-                pairs={pairs}
-                allPairBrains={allPairBrains}
-                selectedSymbol={selectedSymbol}
-                tradingStyle={tradingStyle}
-                onSelectSymbol={setSelectedSymbol}
-                decisionReport={decisionReport}
-                positions={positions}
-                riskGuard={riskGuard}
-                systemStatus={systemStatus}
-                mt5Connected={mt5Connected}
-                busyAction={controlBusy}
-                onClosePosition={handleClosePosition}
-                onStopNewTrades={() => void runSystemControl('STOP_NEW_TRADES')}
-                onResumeNewTrades={() => void runSystemControl('RESUME_NEW_TRADES')}
-                onPauseScanner={() => void runSystemControl('PAUSE_SCANNER')}
-                onResumeScanner={() => void runSystemControl('RESUME_SCANNER')}
-                onDisableAutoTrading={() => void runSystemControl('DISABLE_AUTO_TRADING')}
-                onRequestCloseAll={() => setKillModalOpen(true)}
-                onNavigate={setActiveView}
-              />
-            </>
+          {/* 1B. AUTONOMOUS AI THINKING & 6-CHAT MULTI-AGENT CENTER */}
+          {activeView === 'aichat' && (
+            <AiChatCenterView
+              pairs={pairs}
+              selectedSymbol={selectedSymbol}
+              timeframe={activeTimeframe}
+              onSelectSymbol={setSelectedSymbol}
+              onUnifiedRefresh={() => void fetchUnifiedState()}
+            />
           )}
 
           {/* 2. AI ANALITIK */}
@@ -2585,155 +2580,318 @@ export default function App() {
             />
           )}
 
-          {/* 10. RISK MENEJERI */}
-          {activeView === 'risk' && (
-            <div className="space-y-4">
-              <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-violet-500/15">
-                  <div>
-                    <h1 className="text-lg font-semibold text-slate-900 dark:text-white">
-                      Risk Menejeri & Pozitsiyalar Nazorati
-                    </h1>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Dinamik ATR Stop-Loss, spred/volatillik filtrlari, kunlik zarar limiti va favqulodda himoya qoidalari.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setKillModalOpen(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-500/45 bg-rose-500/10 text-rose-500 hover:bg-rose-600 hover:text-white cursor-pointer whitespace-nowrap"
-                  >
-                    <Power className="w-3.5 h-3.5" />
-                    <span>Barcha ochiq pozitsiyalarni yopish</span>
-                  </button>
-                </div>
+          {/* 10. RISK MENEJERI (PORTFOLIO RISK / POSITION RISK / RISK SETTINGS) */}
+          {activeView === 'risk' && (() => {
+            const acct = unifiedState?.account;
+            const rs = unifiedState?.riskSettings ?? riskSettingsDraft;
+            const dailyPnlVal = mt5Connected ? totalPnlAll : acct?.dailyPnl ?? 0;
+            const portRisk = acct?.portfolioRiskPct ?? 0;
+            const ddPct = acct?.currentDrawdownPct ?? 0;
+            const marginPct = acct?.marginUsagePct ?? 0;
+            const openCnt = mt5Connected ? metrics.openCount : acct?.openCount ?? 0;
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
-                  <div>
-                    <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                      Kunlik max zarar ($)
-                    </label>
-                    <input
-                      type="number"
-                      min={50}
-                      value={riskGuard.dailyMaxLossUsdt}
-                      onChange={(e) =>
-                        setRiskGuard({ ...riskGuard, dailyMaxLossUsdt: Number(e.target.value) || 500 })
-                      }
-                      className="w-full px-3 py-2 font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#060A15] text-slate-900 dark:text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                      Max ochiq pozitsiyalar
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={riskGuard.maxOpenPositions}
-                      onChange={(e) =>
-                        setRiskGuard({ ...riskGuard, maxOpenPositions: Number(e.target.value) || 5 })
-                      }
-                      className="w-full px-3 py-2 font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#060A15] text-slate-900 dark:text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                      Max Drawdown (%)
-                    </label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={50}
-                      step={0.5}
-                      value={riskGuard.drawdownLimitPct}
-                      onChange={(e) =>
-                        setRiskGuard({ ...riskGuard, drawdownLimitPct: Number(e.target.value) || 5 })
-                      }
-                      className="w-full px-3 py-2 font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#060A15] text-slate-900 dark:text-white"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-slate-500 dark:text-slate-400 mb-1">
-                      Savdo riski (%)
-                    </label>
-                    <input
-                      type="number"
-                      min={0.1}
-                      max={10}
-                      step={0.1}
-                      value={riskGuard.defaultRiskPct ?? 1}
-                      onChange={(e) =>
-                        setRiskGuard({ ...riskGuard, defaultRiskPct: Number(e.target.value) || 1 })
-                      }
-                      className="w-full px-3 py-2 font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#060A15] text-slate-900 dark:text-white"
-                    />
-                  </div>
-                </div>
+            return (
+              <div className="space-y-4">
+                {riskTab === 'portfolio' && (
+                  <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-violet-500/15">
+                      <div>
+                        <h1 className="text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                          <ShieldAlert className="w-4 h-4 text-violet-400" />
+                          <span>Portfolio Risk Nazorati</span>
+                        </h1>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Real hisob balans, drawdown, marja yuki, umumiy portfel ekspozitsiyasi va favqulodda himoya boshqaruvi.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runSystemControl(tradingBlocked ? 'RESUME_NEW_TRADES' : 'STOP_NEW_TRADES')
+                          }
+                          disabled={controlBusy !== null}
+                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg border cursor-pointer whitespace-nowrap ${
+                            tradingBlocked
+                              ? 'border-emerald-500/45 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-600 hover:text-white'
+                              : 'border-amber-500/45 bg-amber-500/10 text-amber-400 hover:bg-amber-600 hover:text-white'
+                          }`}
+                        >
+                          {tradingBlocked ? 'Yangi savdolarni tiklash' : 'Yangi savdolarni bloklash'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setKillModalOpen(true)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-rose-500/45 bg-rose-500/10 text-rose-500 hover:bg-rose-600 hover:text-white cursor-pointer whitespace-nowrap"
+                        >
+                          <Power className="w-3.5 h-3.5" />
+                          <span>Barcha ochiq pozitsiyalarni yopish</span>
+                        </button>
+                      </div>
+                    </div>
 
-                <div className="pt-3 border-t border-slate-200 dark:border-violet-500/15 grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs font-mono tabular-nums">
-                  <div>
-                    <span className="font-sans text-slate-500 block">Instrument</span>
-                    <span className="font-semibold text-slate-900 dark:text-white">{activePair.symbol}</span>
-                  </div>
-                  <div>
-                    <span className="font-sans text-slate-500 block">ATR(14) SL / TP</span>
-                    <span className="text-slate-700 dark:text-slate-200">
-                      {formatPrice(decisionReport.riskEvaluation.dynamicStopLoss)} /{' '}
-                      {formatPrice(decisionReport.riskEvaluation.takeProfit)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="font-sans text-slate-500 block">Tavsiya Lot</span>
-                    <span className="text-sky-600 dark:text-sky-400 font-semibold">
-                      {decisionReport.riskEvaluation.recommendedLot.toFixed(2)} lot
-                    </span>
-                  </div>
-                  <div>
-                    <span className="font-sans text-slate-500 block">Spread / Volatillik</span>
-                    <span
-                      className={
-                        decisionReport.riskEvaluation.spreadOk && decisionReport.riskEvaluation.volatilityOk
-                          ? 'text-emerald-500 dark:text-[#00E5A0]'
-                          : 'text-rose-500'
-                      }
-                    >
-                      {decisionReport.riskEvaluation.spreadOk ? 'OK' : 'Keng'} ·{' '}
-                      {decisionReport.riskEvaluation.volatilityOk ? 'Normal' : 'Yuqori'}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="font-sans text-slate-500 block">Risk Filtr Holati</span>
-                    <span
-                      className={
-                        decisionReport.riskEvaluation.overallAllowed && !tradingBlocked
-                          ? 'text-emerald-500 dark:text-[#00E5A0] font-semibold'
-                          : 'text-rose-500 font-semibold'
-                      }
-                    >
-                      {tradingBlocked
-                        ? 'EMERGENCY STOP'
-                        : decisionReport.riskEvaluation.overallAllowed
-                          ? 'RUXSAT ETILGAN'
-                          : 'BLOKLANGAN'}
-                    </span>
-                  </div>
-                </div>
-              </section>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-xs font-mono tabular-nums">
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3">
+                        <span className="font-sans text-[11px] text-slate-500 block">Portfolio Risk</span>
+                        <span
+                          className={`mt-1 block text-base font-bold ${
+                            portRisk <= rs.maxPortfolioRiskPct ? 'text-emerald-500 dark:text-[#00E5A0]' : 'text-rose-500'
+                          }`}
+                        >
+                          {portRisk.toFixed(2)}%
+                        </span>
+                        <span className="text-[10px] text-slate-500">Limit: {rs.maxPortfolioRiskPct}%</span>
+                      </div>
 
-              <PositionsTable
-                positions={positions}
-                onClosePosition={handleClosePosition}
-                onUpdateTargets={handleUpdateTargets}
-                onSelectPair={(sym) => {
-                  setSelectedSymbol(sym);
-                  setActiveView('dashboard');
-                }}
-                title="Barcha MT5 faol va tarixiy pozitsiyalar"
-              />
-            </div>
-          )}
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3">
+                        <span className="font-sans text-[11px] text-slate-500 block">Joriy Drawdown</span>
+                        <span
+                          className={`mt-1 block text-base font-bold ${
+                            ddPct <= rs.maxDrawdownPct ? 'text-sky-500 dark:text-sky-400' : 'text-rose-500'
+                          }`}
+                        >
+                          {ddPct.toFixed(2)}%
+                        </span>
+                        <span className="text-[10px] text-slate-500">Limit: {rs.maxDrawdownPct}%</span>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3">
+                        <span className="font-sans text-[11px] text-slate-500 block">Marja Yuki</span>
+                        <span
+                          className={`mt-1 block text-base font-bold ${
+                            marginPct <= rs.maxMarginUsagePct ? 'text-slate-900 dark:text-white' : 'text-rose-500'
+                          }`}
+                        >
+                          {marginPct.toFixed(1)}%
+                        </span>
+                        <span className="text-[10px] text-slate-500">Limit: {rs.maxMarginUsagePct}%</span>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3">
+                        <span className="font-sans text-[11px] text-slate-500 block">Kunlik P/L</span>
+                        <span
+                          className={`mt-1 block text-base font-bold ${
+                            dailyPnlVal >= 0 ? 'text-emerald-500 dark:text-[#00E5A0]' : 'text-rose-500'
+                          }`}
+                        >
+                          {dailyPnlVal >= 0 ? '+' : ''}
+                          {formatCurrency(dailyPnlVal)}
+                        </span>
+                        <span className="text-[10px] text-slate-500">Max zarar: -${rs.dailyMaxLossUsd}</span>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3">
+                        <span className="font-sans text-[11px] text-slate-500 block">Ochiq Pozitsiyalar</span>
+                        <span className="mt-1 block text-base font-bold text-slate-900 dark:text-white">
+                          {openCnt} / {rs.maxOpenPositions}
+                        </span>
+                        <span className="text-[10px] text-slate-500">
+                          Ekspozitsiya: {formatCurrency(acct?.totalExposureUsd ?? 0)}
+                        </span>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3">
+                        <span className="font-sans text-[11px] text-slate-500 block">Himoya Holati</span>
+                        <span
+                          className={`mt-1 block text-sm font-bold ${
+                            !tradingBlocked && decisionReport.riskEvaluation.overallAllowed
+                              ? 'text-emerald-500 dark:text-[#00E5A0]'
+                              : 'text-rose-500'
+                          }`}
+                        >
+                          {tradingBlocked
+                            ? 'EMERGENCY STOP'
+                            : decisionReport.riskEvaluation.overallAllowed
+                              ? 'RUXSAT ETILGAN'
+                              : 'BLOKLANGAN'}
+                        </span>
+                        <span className="text-[10px] text-slate-500">
+                          Balans: {formatCurrency(mt5Connected ? metrics.totalEquity : acct?.equity ?? baseBalance)}
+                        </span>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                {riskTab === 'position' && (
+                  <>
+                    <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-200 dark:border-violet-500/15">
+                        <div>
+                          <h1 className="text-base font-semibold text-slate-900 dark:text-white">
+                            Position Risk & Dinamik ATR Kalkulyator
+                          </h1>
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Tanlangan instrument uchun dinamik Stop-Loss, Take-Profit, tavsiya lot va spred/volatillik tekshiruvi.
+                          </p>
+                        </div>
+                        <select
+                          value={selectedSymbol}
+                          onChange={(e) => setSelectedSymbol(e.target.value)}
+                          className="px-2.5 py-1.5 text-xs font-mono rounded-lg border border-slate-200 dark:border-violet-500/30 bg-slate-50 dark:bg-[#060A15] text-slate-900 dark:text-white"
+                        >
+                          {pairs.map((p) => (
+                            <option key={p.symbol} value={p.symbol}>
+                              {p.symbol}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs font-mono tabular-nums">
+                        <div>
+                          <span className="font-sans text-slate-500 block">Instrument</span>
+                          <span className="font-semibold text-slate-900 dark:text-white">{activePair.symbol}</span>
+                        </div>
+                        <div>
+                          <span className="font-sans text-slate-500 block">ATR(14) SL / TP</span>
+                          <span className="text-slate-700 dark:text-slate-200">
+                            {formatPrice(decisionReport.riskEvaluation.dynamicStopLoss)} /{' '}
+                            {formatPrice(decisionReport.riskEvaluation.takeProfit)}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="font-sans text-slate-500 block">Tavsiya Lot</span>
+                          <span className="text-sky-600 dark:text-sky-400 font-semibold">
+                            {decisionReport.riskEvaluation.recommendedLot.toFixed(2)} lot
+                          </span>
+                        </div>
+                        <div>
+                          <span className="font-sans text-slate-500 block">Spread / Volatillik</span>
+                          <span
+                            className={
+                              decisionReport.riskEvaluation.spreadOk && decisionReport.riskEvaluation.volatilityOk
+                                ? 'text-emerald-500 dark:text-[#00E5A0]'
+                                : 'text-rose-500'
+                            }
+                          >
+                            {decisionReport.riskEvaluation.spreadOk ? 'OK' : 'Keng'} ·{' '}
+                            {decisionReport.riskEvaluation.volatilityOk ? 'Normal' : 'Yuqori'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="font-sans text-slate-500 block">Risk Filtr Holati</span>
+                          <span
+                            className={
+                              decisionReport.riskEvaluation.overallAllowed && !tradingBlocked
+                                ? 'text-emerald-500 dark:text-[#00E5A0] font-semibold'
+                                : 'text-rose-500 font-semibold'
+                            }
+                          >
+                            {tradingBlocked
+                              ? 'EMERGENCY STOP'
+                              : decisionReport.riskEvaluation.overallAllowed
+                                ? 'RUXSAT ETILGAN'
+                                : 'BLOKLANGAN'}
+                          </span>
+                        </div>
+                      </div>
+                    </section>
+
+                    <PositionsTable
+                      positions={positions}
+                      onClosePosition={handleClosePosition}
+                      onUpdateTargets={handleUpdateTargets}
+                      onSelectPair={(sym) => {
+                        setSelectedSymbol(sym);
+                        handleNavigate('dashboard');
+                      }}
+                      title="Barcha faol va tarixiy pozitsiyalar"
+                    />
+                  </>
+                )}
+
+                {riskTab === 'settings' && (
+                  <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-violet-500/15">
+                      <div>
+                        <h1 className="text-base font-semibold text-slate-900 dark:text-white">
+                          Risk Sozlamalari (Backend DB bilan doimiy sinxron)
+                        </h1>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Barcha buyurtmalar va AI tahlil modullari ushbu saqlangan limitlarga qat‘iy amal qiladi.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={riskSaveBusy}
+                        onClick={async () => {
+                          setRiskSaveBusy(true);
+                          setRiskSaveFeedback(null);
+                          const res = await handleSaveRiskSettings(riskSettingsDraft);
+                          setRiskGuard((prev) => ({
+                            ...prev,
+                            dailyMaxLossUsdt: riskSettingsDraft.dailyMaxLossUsd,
+                            maxOpenPositions: riskSettingsDraft.maxOpenPositions,
+                            drawdownLimitPct: riskSettingsDraft.maxDrawdownPct,
+                            defaultRiskPct: riskSettingsDraft.riskPerTradePct,
+                          }));
+                          setRiskSaveFeedback({
+                            ok: res.ok,
+                            msg: res.ok ? 'Risk sozlamalari bazaga saqlandi.' : res.error ?? 'Saqlashda xato.',
+                          });
+                          setRiskSaveBusy(false);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-violet-600 to-sky-500 text-white hover:brightness-110 disabled:opacity-50 cursor-pointer"
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>{riskSaveBusy ? 'Saqlanmoqda...' : 'Sozlamalarni saqlash'}</span>
+                      </button>
+                    </div>
+
+                    {riskSaveFeedback && (
+                      <div
+                        className={`px-3 py-2 rounded-lg text-xs border ${
+                          riskSaveFeedback.ok
+                            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                            : 'border-rose-500/40 bg-rose-500/10 text-rose-400'
+                        }`}
+                      >
+                        {riskSaveFeedback.msg}
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 text-xs">
+                      {[
+                        { key: 'dailyMaxLossUsd', label: 'Kunlik max zarar ($)', min: 25, step: 25 },
+                        { key: 'maxOpenPositions', label: 'Max ochiq pozitsiya', min: 1, step: 1 },
+                        { key: 'maxDrawdownPct', label: 'Max Drawdown (%)', min: 1, step: 0.5 },
+                        { key: 'riskPerTradePct', label: 'Savdo riski (%)', min: 0.1, step: 0.1 },
+                        { key: 'maxPortfolioRiskPct', label: 'Max Portfolio Risk (%)', min: 0.5, step: 0.5 },
+                        { key: 'maxMarginUsagePct', label: 'Max Marja Yuki (%)', min: 5, step: 5 },
+                        { key: 'maxCorrelatedExposure', label: 'Max Korrelyatsiya', min: 1, step: 1 },
+                        { key: 'maxSpreadPoints', label: 'Max Spread (pts)', min: 5, step: 5 },
+                        { key: 'maxVolatilityAtrPct', label: 'Max Volatillik ATR (%)', min: 0.5, step: 0.25 },
+                        { key: 'testAccountBalanceUsd', label: 'Test Balans ($)', min: 100, step: 500 },
+                      ].map((field) => {
+                        const k = field.key as keyof PersistentRiskSettings;
+                        return (
+                          <div key={field.key}>
+                            <label className="block text-slate-500 dark:text-slate-400 mb-1">
+                              {field.label}
+                            </label>
+                            <input
+                              type="number"
+                              min={field.min}
+                              step={field.step}
+                              value={riskSettingsDraft[k]}
+                              onChange={(e) =>
+                                setRiskSettingsDraft((prev) => ({
+                                  ...prev,
+                                  [k]: Number(e.target.value) || field.min,
+                                }))
+                              }
+                              className="w-full px-3 py-2 font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#060A15] text-slate-900 dark:text-white"
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
+              </div>
+            );
+          })()}
 
           {/* 10B. ECONOMIC CALENDAR */}
           {activeView === 'calendar' && <EconomicCalendarView />}
@@ -2805,50 +2963,300 @@ export default function App() {
             />
           )}
 
-          {/* 13. SOZLAMALAR */}
+          {/* 13. SOZLAMALAR (TERMINAL / AI / DATA SOURCES / SYSTEM CONFIG + SYSTEM HEALTH) */}
           {activeView === 'settings' && (
             <div className="space-y-4">
-              <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h1 className="text-base font-semibold text-slate-900 dark:text-white">
-                    Terminal Sozlamalari va Eksport
-                  </h1>
-                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                    Avto-qulflash: {authSession.autoLockMinutes} daqiqa · Mavzu: {darkMode ? 'Tungi Neon' : 'Yorug‘'} · Lokal MT5 Bridge integratsiyasi
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDarkMode((prev) => !prev)}
-                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-violet-500/30 text-slate-700 dark:text-slate-300 hover:border-sky-400 cursor-pointer"
-                  >
-                    {darkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
-                    <span>{darkMode ? 'Yorug‘ rejimga o‘tish' : 'Tungi rejimga o‘tish'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleExportStandaloneHtml}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-violet-600 via-sky-500 to-emerald-500 text-slate-950 hover:brightness-110 cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>index.html yuklab olish</span>
-                  </button>
-                </div>
-              </section>
+              {settingsTab === 'terminal' && (
+                <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-200 dark:border-violet-500/15">
+                    <div>
+                      <h1 className="text-base font-semibold text-slate-900 dark:text-white">
+                        Terminal Sozlamalari va Eksport
+                      </h1>
+                      <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                        Interfeys mavzusi, sessiya xavfsizligi, avtomatik qulflash va oflayn eksport boshqaruvi.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setDarkMode((prev) => !prev)}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-violet-500/30 text-slate-700 dark:text-slate-300 hover:border-sky-400 cursor-pointer"
+                      >
+                        {darkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+                        <span>{darkMode ? 'Yorug‘ rejimga o‘tish' : 'Tungi Neon rejimga o‘tish'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportStandaloneHtml}
+                        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-violet-600 via-sky-500 to-emerald-500 text-slate-950 hover:brightness-110 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>index.html yuklab olish</span>
+                      </button>
+                    </div>
+                  </div>
 
-              <ServerBridgeView
-                serverConfig={serverConfig}
-                onUpdateConfig={setServerConfig}
-                pairs={pairs}
-                positions={positions}
-                strategies={strategies}
-                riskGuard={riskGuard}
-                onSyncFromServer={(data) => {
-                  setMt5Connected(true);
-                  applyServerSnapshot(data as Parameters<typeof applyServerSnapshot>[0]);
-                }}
-              />
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-1">
+                      <div className="text-slate-500">Avtomatik qulflash</div>
+                      <div className="font-mono font-bold text-slate-900 dark:text-white">
+                        {authSession.autoLockMinutes} daqiqa
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleNavigate('owner')}
+                        className="inline-flex items-center gap-1 text-[11px] text-sky-500 hover:underline cursor-pointer pt-1"
+                      >
+                        <UserCheck className="w-3 h-3" />
+                        <span>Owner Centerda o‘zgartirish</span>
+                      </button>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-1">
+                      <div className="text-slate-500">Joriy mavzu</div>
+                      <div className="font-semibold text-slate-900 dark:text-white">
+                        {darkMode ? 'Neon Institutional Dark' : 'Clean Light'}
+                      </div>
+                      <div className="text-[11px] text-slate-500">Compact 10-bo‘limli navigatsiya</div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-2">
+                      <div className="text-slate-500">Tezkor sessiya boshqaruvi</div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void handleLockSystem()}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-violet-500/40 bg-violet-500/10 text-violet-400 text-[11px] font-semibold cursor-pointer"
+                        >
+                          <Lock className="w-3 h-3" />
+                          <span>Qulflash</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleLogout()}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-[11px] font-semibold cursor-pointer"
+                        >
+                          <LogOut className="w-3 h-3" />
+                          <span>Chiqish</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
+
+              {settingsTab === 'ai' && (() => {
+                const llm = unifiedState?.llmHealth;
+                const statusColor =
+                  llm?.status === 'ACTIVE'
+                    ? 'text-emerald-500 dark:text-[#00E5A0]'
+                    : llm?.status === 'ERROR'
+                      ? 'text-rose-500'
+                      : 'text-amber-500 dark:text-amber-400';
+
+                return (
+                  <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-violet-500/15">
+                      <div>
+                        <h1 className="text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                          <BrainCircuit className="w-4 h-4 text-violet-400" />
+                          <span>AI Konfiguratsiyasi va LLM Holati</span>
+                        </h1>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Deterministik 18-strategiyali tahlil doimo ishlaydi; tashqi LLM API holati haqiqiy tekshiruv asosida ko‘rsatiladi.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={analyzingSymbol !== null}
+                          onClick={() => void handleRunUnifiedAnalysis(selectedSymbol, activeTimeframe)}
+                          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-violet-600 text-white hover:bg-violet-500 disabled:opacity-50 cursor-pointer"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${analyzingSymbol ? 'animate-spin' : ''}`} />
+                          <span>{selectedSymbol} tahlilni sinash</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleNavigate('analyst')}
+                          className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-violet-500/30 text-slate-700 dark:text-slate-200 hover:border-sky-400 cursor-pointer"
+                        >
+                          AI Intelligence ga o‘tish
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-1">
+                        <span className="text-slate-500">Tashqi AI / LLM API holati</span>
+                        <div className={`font-mono font-bold text-sm ${statusColor}`}>
+                          {llm?.status ?? 'UNCONFIGURED'}
+                        </div>
+                        <div className="text-[11px] text-slate-500 font-mono">
+                          Provayder: {llm?.provider ?? 'Sozlanmagan'}
+                        </div>
+                        {llm?.lastError && (
+                          <div className="text-[11px] text-rose-400 pt-1 break-words">{llm.lastError}</div>
+                        )}
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-1">
+                        <span className="text-slate-500">Deterministik Engine & Ensemble</span>
+                        <div className="font-mono font-bold text-sm text-emerald-500 dark:text-[#00E5A0]">
+                          ACTIVE · {unifiedState?.activeStrategiesCount ?? 0}/{unifiedState?.totalStrategiesCount ?? 18} strategiya
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          MTF (M1-W1) + SMC/ICT + Candlestick + Risk Filter
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <span className="text-slate-500">AI Kengaytirilgan Ruxsat</span>
+                          <button
+                            type="button"
+                            onClick={() => setFullAiPermissions((prev) => !prev)}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-semibold cursor-pointer ${
+                              fullAiPermissions
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40'
+                                : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                            }`}
+                          >
+                            {fullAiPermissions ? 'YOQILGAN' : 'O‘CHIRILGAN'}
+                          </button>
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Avto-savdo rejimi va Owner cheklovlari doirasida amal qiladi.
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                );
+              })()}
+
+              {settingsTab === 'data' && (
+                <DataSourcesView
+                  dataSources={unifiedState?.dataSources ?? null}
+                  serverConfig={serverConfig}
+                  onUpdateServerConfig={setServerConfig}
+                  pairs={pairs}
+                  positions={positions}
+                  strategies={strategies}
+                  riskGuard={riskGuard}
+                  onSyncFromServer={(data) => {
+                    setMt5Connected(true);
+                    applyServerSnapshot(data as Parameters<typeof applyServerSnapshot>[0]);
+                  }}
+                  onRefreshUnified={fetchUnifiedState}
+                  refreshing={refreshingUnified}
+                />
+              )}
+
+              {settingsTab === 'system' && (
+                <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200 dark:border-violet-500/15">
+                    <div>
+                      <h1 className="text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
+                        <Activity className="w-4 h-4 text-sky-400" />
+                        <span>Tizim Konfiguratsiyasi & Fon Skaneri</span>
+                      </h1>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        24/7 skaner sikli, lokal ma‘lumotlar bazasi, zaxira nusxa va to‘liq System Health diagnostikasi.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleNavigate('monitor')}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-violet-500/40 bg-violet-500/15 text-violet-600 dark:text-violet-300 hover:bg-violet-500/25 cursor-pointer"
+                    >
+                      <MonitorCheck className="w-3.5 h-3.5" />
+                      <span>System Health (To‘liq Monitor)</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                    <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-2">
+                      <div className="text-slate-500">24/7 Market Scanner</div>
+                      <div
+                        className={`font-mono font-bold text-sm ${
+                          unifiedState?.scanner.status === 'RUNNING'
+                            ? 'text-emerald-500 dark:text-[#00E5A0]'
+                            : 'text-amber-400'
+                        }`}
+                      >
+                        {unifiedState?.scanner.status ?? 'RUNNING'} · {unifiedState?.scanner.instrumentsScanned ?? 0} juftlik
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleScannerAction(
+                              unifiedState?.scanner.status === 'RUNNING' ? 'pause' : 'resume'
+                            )
+                          }
+                          className="px-2.5 py-1 rounded-md border border-violet-500/35 bg-violet-500/10 text-violet-400 font-semibold cursor-pointer"
+                        >
+                          {unifiedState?.scanner.status === 'RUNNING' ? 'Pauza' : 'Davom ettirish'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleScannerAction('scan-now')}
+                          className="px-2.5 py-1 rounded-md border border-sky-500/35 bg-sky-500/10 text-sky-400 font-semibold cursor-pointer"
+                        >
+                          Hozir skanerlash
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-1 font-mono tabular-nums">
+                      <div className="font-sans text-slate-500">Lokal DB & Server</div>
+                      <div className="text-sm font-bold text-emerald-500 dark:text-[#00E5A0]">
+                        {unifiedState?.system?.dbStatus ?? 'HEALTHY'} · {unifiedState?.system?.dbSizeKb ?? 0} KB
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        Tahlillar: {unifiedState?.historyCounts.analyses ?? 0} · Orderlar:{' '}
+                        {unifiedState?.historyCounts.orders ?? 0}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 dark:border-violet-500/20 bg-slate-50 dark:bg-[#060A15] p-3 space-y-2">
+                      <div className="text-slate-500">Xavfsizlik & Savdo Nazorati</div>
+                      <div className="flex items-center gap-2 text-xs">
+                        <ShieldCheck className="w-4 h-4 text-[#00E5A0]" />
+                        <span className="text-slate-700 dark:text-slate-200">
+                          Server Onlayn · Uptime {unifiedState?.system?.serverUptimeSec ?? 0}s · Backup:{' '}
+                          {systemStatus?.control.autoBackupEnabled ? 'ON' : 'OFF'}
+                        </span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void runSystemControl(tradingBlocked ? 'RESUME_NEW_TRADES' : 'STOP_NEW_TRADES')
+                          }
+                          disabled={controlBusy !== null}
+                          className={`px-2.5 py-1 rounded-md border text-[11px] font-semibold cursor-pointer ${
+                            tradingBlocked
+                              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
+                              : 'border-amber-500/40 bg-amber-500/10 text-amber-400'
+                          }`}
+                        >
+                          {tradingBlocked ? 'Savdolarni tiklash' : 'Yangi savdolarni to‘xtatish'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void runSystemControl('DISABLE_AUTO_TRADING')}
+                          disabled={controlBusy !== null}
+                          className="px-2.5 py-1 rounded-md border border-rose-500/40 bg-rose-500/10 text-rose-400 text-[11px] font-semibold cursor-pointer"
+                        >
+                          Avto-savdoni o‘chirish
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              )}
             </div>
           )}
         </main>

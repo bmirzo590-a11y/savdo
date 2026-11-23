@@ -4,12 +4,13 @@ import {
   BacktestResult,
   CandlePoint,
   MarketPair,
+  RealOhlcApiResponse,
   ServerConfig,
   Timeframe,
   TradingStyle,
 } from '../types/trading';
 import { formatCurrency, formatPrice } from '../config/initialData';
-import { generateMt5Candles, runBacktestEngine } from '../utils/backtestEngine';
+import { runBacktestEngine } from '../utils/backtestEngine';
 import { Play, Sparkles, RefreshCw } from 'lucide-react';
 import { apiFetch } from '../utils/apiClient';
 
@@ -55,6 +56,8 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
 
   const [result, setResult] = useState<BacktestResult | null>(null);
   const [running, setRunning] = useState(false);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [realFeedLabel, setRealFeedLabel] = useState<string>('');
   const [aiReport, setAiReport] = useState<AiBacktestReport | null>(null);
   const [analyzingAi, setAnalyzingAi] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -62,50 +65,42 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
   const executeBacktest = async (overrideParams?: BacktestParams) => {
     const activeParams = overrideParams ?? params;
     setRunning(true);
+    setDataError(null);
     setAiReport(null);
 
     let candles: CandlePoint[] = [];
-    let dataSource: 'MT5 Real Tarix' | 'Simulyatsiya (MT5 ulanmagan)' =
-      'Simulyatsiya (MT5 ulanmagan)';
+    const dataSource: 'MT5 Real Tarix' | 'Simulyatsiya (MT5 ulanmagan)' = 'MT5 Real Tarix';
+    let feedTag = '';
 
-    const primaryBase = serverConfig.apiBaseUrl.replace(/\/$/, '');
-    const candidates =
-      primaryBase === 'http://127.0.0.1:8000'
-        ? [primaryBase, 'http://localhost:8000']
-        : [primaryBase];
-
-    for (const base of candidates) {
-      try {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 1800);
-        const url = `${base}/api/candles?symbol=${encodeURIComponent(
-          activeParams.symbol
-        )}&timeframe=${activeParams.timeframe}&count=${activeParams.barsCount}`;
-        const res = await fetch(url, { signal: controller.signal });
-        window.clearTimeout(timeout);
-        if (res.ok) {
-          const json = await res.json();
-          if (Array.isArray(json.candles) && json.candles.length > 20) {
-            candles = json.candles;
-            dataSource = 'MT5 Real Tarix';
-            break;
-          }
-        }
-      } catch {
-        // Try next candidate or fallback
-      }
-    }
-
-    if (candles.length === 0) {
-      const pair = pairs.find((p) => p.symbol === activeParams.symbol) ?? pairs[0];
-      candles = generateMt5Candles(
-        activeParams.symbol,
-        pair.price,
-        activeParams.timeframe,
-        activeParams.barsCount
+    // Single Unified MT5 Backend OHLC (supports both live MT5 Bridge & persisted 2-3Y MT5 disk history)
+    try {
+      const res = await apiFetch(
+        `/api/market/ohlc?symbol=${encodeURIComponent(activeParams.symbol)}&timeframe=${encodeURIComponent(activeParams.timeframe)}&limit=${Math.min(25000, Math.max(100, activeParams.barsCount))}&allowHistory=1&force=1`
       );
+      const json = (await res.json().catch(() => ({}))) as RealOhlcApiResponse;
+      if (res.ok && json.ok && Array.isArray(json.candles) && json.candles.length > 25) {
+        candles = json.candles;
+        feedTag =
+          json.source === 'MT5_HISTORY_CACHE'
+            ? `MT5 Tarixiy Arxiv (${json.barsCount} bar · MT5 uzilgan)`
+            : `MT5 BROKER (${json.barsCount} real bar)`;
+      } else {
+        setResult(null);
+        setDataError(
+          json.error ||
+            `${activeParams.symbol} (${activeParams.timeframe}) uchun MT5 tarixiy OHLC mavjud emas. Avval Settings → Data Sources orqali MT5 ulab tarixni yuklang.`
+        );
+        setRunning(false);
+        return;
+      }
+    } catch (err) {
+      setResult(null);
+      setDataError(err instanceof Error ? err.message : 'MT5 tarixiy OHLC yuklashda xatolik.');
+      setRunning(false);
+      return;
     }
 
+    setRealFeedLabel(feedTag);
     const computed = runBacktestEngine(activeParams, candles, dataSource);
     setResult(computed);
     if (onResultChange) onResultChange(computed);
@@ -252,6 +247,18 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
             </button>
           </div>
         </div>
+
+        {realFeedLabel && !dataError && (
+          <div className="mt-3 text-xs font-mono text-emerald-600 dark:text-[#00E5A0]">
+            Real ma’lumot manbai: {realFeedLabel}
+          </div>
+        )}
+
+        {dataError && (
+          <div className="mt-3 rounded-lg border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-600 dark:text-rose-300 font-mono">
+            DATA UNAVAILABLE: {dataError}
+          </div>
+        )}
 
         <form
           onSubmit={(e) => {

@@ -2,14 +2,15 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   CandlePoint,
   MarketPair,
+  RealOhlcApiResponse,
   ServerConfig,
   StrategyBrainSnapshot,
   Timeframe,
   TradingStyle,
 } from '../types/trading';
 import { formatPrice } from '../config/initialData';
-import { generateMt5Candles } from '../utils/backtestEngine';
 import { analyzeStrategyBrain, StrategyBrainAnalysis } from '../utils/strategyBrain';
+import { apiFetch } from '../utils/apiClient';
 
 interface PriceChartProps {
   pairs: MarketPair[];
@@ -58,10 +59,12 @@ export const PriceChart: React.FC<PriceChartProps> = ({
 
   const [chartType, setChartType] = useState<'candles' | 'area'>('candles');
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const [mt5LiveCandles, setMt5LiveCandles] = useState<CandlePoint[] | null>(null);
-  const [candleSource, setCandleSource] = useState<'MT5 Real Shamlar' | 'Lokal Simulyatsiya'>(
-    'Lokal Simulyatsiya'
-  );
+  const [liveCandles, setLiveCandles] = useState<CandlePoint[]>([]);
+  const [candleSource, setCandleSource] = useState<string>('YUKLANMOQDA');
+  const [candleFreshnessSec, setCandleFreshnessSec] = useState<number | null>(null);
+  const [loadingCandles, setLoadingCandles] = useState<boolean>(true);
+  const [candleError, setCandleError] = useState<string | null>(null);
+  const [reloadTick, setReloadTick] = useState<number>(0);
 
   const [showEmaRibbon, setShowEmaRibbon] = useState(true);
   const [showPac, setShowPac] = useState(false);
@@ -77,7 +80,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
 
   useEffect(() => {
     if (!controlledTimeframe) {
-      setInternalTimeframe(tradingStyle === 'SCALPING' ? 'M5' : 'H4');
+      setInternalTimeframe(tradingStyle === 'SCALPING' ? 'M15' : 'H4');
     }
   }, [tradingStyle, controlledTimeframe]);
 
@@ -86,76 +89,80 @@ export const PriceChart: React.FC<PriceChartProps> = ({
     [pairs, selectedSymbol]
   );
 
-  // Fetch & live-poll real MT5 candles from PC mt5_bridge.py so chart matches MT5 bar-by-bar
+  // Fetch REAL OHLC candles strictly through unified MT5 backend API (/api/market/ohlc).
+  // ZERO external APIs (Binance/Kraken/Yahoo) and ZERO synthetic candle fallback!
   useEffect(() => {
     let cancelled = false;
-    async function loadMt5Candles() {
-      const primaryBase = serverConfig.apiBaseUrl.replace(/\/$/, '');
-      const candidates =
-        primaryBase === 'http://127.0.0.1:8000'
-          ? [primaryBase, 'http://localhost:8000']
-          : [primaryBase];
 
-      for (const base of candidates) {
-        try {
-          const controller = new AbortController();
-          const timeout = window.setTimeout(() => controller.abort(), 1600);
-          const res = await fetch(
-            `${base}/api/candles?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${timeframe}&count=180`,
-            { signal: controller.signal }
-          );
-          window.clearTimeout(timeout);
-          if (!res.ok) continue;
-          const data = await res.json();
-          if (!cancelled && Array.isArray(data.candles) && data.candles.length > 20) {
-            setMt5LiveCandles(data.candles);
-            setCandleSource('MT5 Real Shamlar');
-            return;
+    async function loadRealCandles(force = false) {
+      if (!cancelled && liveCandles.length === 0) {
+        setLoadingCandles(true);
+      }
+
+      try {
+        const res = await apiFetch(
+          `/api/market/ohlc?symbol=${encodeURIComponent(selectedSymbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=180&allowHistory=1${force ? '&force=1' : ''}`
+        );
+        const data = (await res.json().catch(() => ({}))) as RealOhlcApiResponse;
+        if (!cancelled) {
+          if (res.ok && data.ok && Array.isArray(data.candles) && data.candles.length >= 20) {
+            setLiveCandles(data.candles.slice(-180));
+            setCandleSource(
+              data.source === 'MT5_HISTORY_CACHE'
+                ? 'MT5_ARXIV (UZILGAN)'
+                : data.connectionStatus === 'STALE'
+                  ? 'MT5_STALE'
+                  : 'MT5_BROKER'
+            );
+            setCandleFreshnessSec(data.freshnessSec ?? null);
+            setCandleError(data.source === 'MT5_HISTORY_CACHE' ? data.error : null);
+          } else {
+            setLiveCandles([]);
+            setCandleSource(data.connectionStatus === 'DISCONNECTED' ? 'MT5_DISCONNECTED' : 'DATA_UNAVAILABLE');
+            setCandleFreshnessSec(null);
+            setCandleError(
+              data.error ||
+                `${selectedSymbol} (${timeframe}) uchun MetaTrader 5 OHLC ma’lumoti mavjud emas.`
+            );
           }
-        } catch {
-          // Try next candidate
+          setLoadingCandles(false);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setLiveCandles([]);
+          setCandleSource('MT5_DISCONNECTED');
+          setCandleFreshnessSec(null);
+          setCandleError(err instanceof Error ? err.message : 'MT5 backend ma’lumotiga ulanish xatosi.');
+          setLoadingCandles(false);
         }
       }
-      if (!cancelled) {
-        setMt5LiveCandles(null);
-        setCandleSource('Lokal Simulyatsiya');
-      }
     }
-    loadMt5Candles();
-    if (!serverConfig.autoSyncMt5) {
-      return () => {
-        cancelled = true;
-      };
-    }
-    const timer = window.setInterval(loadMt5Candles, Math.max(1500, serverConfig.pollingIntervalMs || 2000));
+
+    setLiveCandles([]);
+    setHoverIndex(null);
+    void loadRealCandles(reloadTick > 0);
+    const timer = window.setInterval(() => void loadRealCandles(false), 12_000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [selectedSymbol, timeframe, serverConfig.apiBaseUrl, serverConfig.autoSyncMt5, serverConfig.pollingIntervalMs]);
+  }, [selectedSymbol, timeframe, serverConfig.apiBaseUrl, serverConfig.autoSyncMt5, reloadTick]);
 
-  // Keep 180 bars so EMA 100/200, Swing SMC, PAC 34, and RSI Divergences warm up cleanly
-  const fullCandles: CandlePoint[] = useMemo(() => {
-    if (mt5LiveCandles && mt5LiveCandles.length > 20) {
-      return mt5LiveCandles.slice(-180);
-    }
-    return generateMt5Candles(activePair.symbol, activePair.price, timeframe, 180).map(
-      (c, idx, arr) => (idx === arr.length - 1 ? { ...c, close: activePair.price } : c)
-    );
-  }, [mt5LiveCandles, activePair.symbol, activePair.price, timeframe]);
+  const fullCandles: CandlePoint[] = liveCandles;
 
   const brain = useMemo(
-    () => analyzeStrategyBrain(fullCandles, activePair.symbol, timeframe),
+    () => (fullCandles.length >= 20 ? analyzeStrategyBrain(fullCandles, activePair.symbol, timeframe) : null),
     [fullCandles, activePair.symbol, timeframe]
   );
 
   useEffect(() => {
-    if (onCandlesUpdate) {
+    if (onCandlesUpdate && fullCandles.length >= 20) {
       onCandlesUpdate(fullCandles);
     }
   }, [fullCandles, onCandlesUpdate]);
 
   useEffect(() => {
+    if (!brain) return;
     if (onBrainUpdate) {
       onBrainUpdate(brain.snapshot);
     }
@@ -178,6 +185,9 @@ export const PriceChart: React.FC<PriceChartProps> = ({
   const plotH = height - padTop - padBottom;
 
   const { minPrice, maxPrice, maxVol } = useMemo(() => {
+    if (!brain || candles.length === 0) {
+      return { minPrice: 0, maxPrice: 1, maxVol: 1 };
+    }
     let min = Infinity;
     let max = -Infinity;
     let mVol = 1;
@@ -208,9 +218,9 @@ export const PriceChart: React.FC<PriceChartProps> = ({
       }
       if (c.volume > mVol) mVol = c.volume;
     }
-    const padding = (max - min) * 0.1 || activePair.price * 0.005;
+    const padding = (max - min) * 0.1 || Math.max(activePair.price, 1) * 0.005;
     return { minPrice: min - padding, maxPrice: max + padding, maxVol: mVol };
-  }, [candles, startOffset, brain.series, showEmaRibbon, showVwap, showSupertrend, showUtZlsma, showIchimoku, activePair.price]);
+  }, [candles, startOffset, brain, showEmaRibbon, showVwap, showSupertrend, showUtZlsma, showIchimoku, activePair.price]);
 
   const priceToY = (price: number) => {
     const ratio = (price - minPrice) / (maxPrice - minPrice || 1);
@@ -252,14 +262,92 @@ export const PriceChart: React.FC<PriceChartProps> = ({
       .join(' ');
   }, [candles, stepX, minPrice, maxPrice]);
 
-  const hoveredCandle = hoverIndex !== null ? candles[hoverIndex] : candles[candles.length - 1];
+  const hoveredCandle =
+    candles.length > 0 ? (hoverIndex !== null ? candles[hoverIndex] : candles[candles.length - 1]) : null;
+  const liveLatestPrice = candles.length > 0 ? candles[candles.length - 1].close : activePair.price;
   const isPositive = activePair.change24h >= 0;
   const yTicks = [0, 0.25, 0.5, 0.75, 1].map((t) => minPrice + (maxPrice - minPrice) * t);
+
+  if (!brain || !hoveredCandle) {
+    return (
+      <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-4 h-full flex flex-col justify-between min-h-[420px]">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-violet-500/15">
+          <div className="flex items-center gap-2">
+            <select
+              aria-label="Instrumentni tanlash"
+              value={selectedSymbol}
+              onChange={(e) => onSelectSymbol(e.target.value)}
+              className="px-2.5 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-violet-500/35 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-sky-300"
+            >
+              {pairs.map((p) => (
+                <option key={p.symbol} value={p.symbol}>
+                  {p.symbol}
+                </option>
+              ))}
+            </select>
+            <div className="flex items-center gap-0.5 p-0.5 rounded-lg bg-slate-100 dark:bg-[#070C18] border border-slate-200 dark:border-violet-500/20">
+              {TIMEFRAMES.map((tf) => (
+                <button
+                  key={tf}
+                  type="button"
+                  onClick={() => setTimeframe(tf)}
+                  className={`px-2 py-1 text-[11px] font-medium rounded cursor-pointer ${
+                    timeframe === tf
+                      ? 'bg-white dark:bg-sky-500/20 text-slate-900 dark:text-sky-300'
+                      : 'text-slate-500 dark:text-slate-400'
+                  }`}
+                >
+                  {tf}
+                </button>
+              ))}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setReloadTick((v) => v + 1)}
+            className="px-2.5 py-1 text-xs font-medium rounded-lg border border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-300 hover:bg-sky-500/20 cursor-pointer"
+          >
+            Qayta yuklash
+          </button>
+        </div>
+
+        <div className="flex-1 flex flex-col items-center justify-center text-center py-12 px-4">
+          {loadingCandles ? (
+            <>
+              <div className="w-7 h-7 rounded-full border-2 border-sky-400 border-t-transparent animate-spin mb-3" />
+              <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
+                MT5 Broker OHLC shamlari yuklanmoqda ({selectedSymbol} · {timeframe})
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                MetaTrader 5 broker serveridan haqiqiy shamlar olinmoqda...
+              </p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-bold font-mono text-rose-500 dark:text-rose-400">
+                {candleSource === 'MT5_DISCONNECTED' ? 'MT5 DISCONNECTED' : 'DATA UNAVAILABLE'} — {selectedSymbol} ({timeframe})
+              </p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1.5 max-w-md">
+                {candleError || 'MetaTrader 5 OHLC ma’lumoti mavjud emas. Tashqi API va soxta shamlar o‘chirilgan.'}
+              </p>
+              <button
+                type="button"
+                onClick={() => setReloadTick((v) => v + 1)}
+                className="mt-4 px-3 py-1.5 text-xs font-semibold rounded-lg border border-violet-500/40 bg-violet-500/15 text-violet-700 dark:text-violet-300 hover:bg-violet-500/25 cursor-pointer"
+              >
+                MT5 ma’lumotini qayta so‘rash
+              </button>
+            </>
+          )}
+        </div>
+      </section>
+    );
+  }
 
   const snap = brain.snapshot;
 
   return (
-    <section className="rounded-xl border border-slate-200 dark:border-slate-800/90 bg-white dark:bg-[#131B2B] neon-surface p-5 h-full">
+    <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0D1426] p-4 h-full">
       <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
         <div className="flex flex-wrap items-center gap-3">
           <select
@@ -276,11 +364,11 @@ export const PriceChart: React.FC<PriceChartProps> = ({
           </select>
 
           <div className="flex items-baseline gap-2.5">
-            <span className="text-2xl font-semibold font-mono tabular-nums text-slate-900 dark:text-white">
-              {formatPrice(activePair.price)}
+            <span className="text-xl font-semibold font-mono tabular-nums text-slate-900 dark:text-white">
+              {formatPrice(liveLatestPrice)}
             </span>
             <span
-              className={`text-sm font-mono tabular-nums font-medium ${
+              className={`text-xs font-mono tabular-nums font-medium ${
                 isPositive ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-rose-400'
               }`}
             >
@@ -370,8 +458,9 @@ export const PriceChart: React.FC<PriceChartProps> = ({
           <span className="text-sky-600 dark:text-sky-400 font-medium">
             C: {formatPrice(hoveredCandle.close)}
           </span>
-          <span className={candleSource === 'MT5 Real Shamlar' ? 'text-[#00E5A0]' : 'text-slate-400'}>
+          <span className="text-emerald-600 dark:text-[#00E5A0] font-semibold">
             · {candleSource}
+            {candleFreshnessSec !== null ? ` (${candleFreshnessSec}s)` : ''}
           </span>
         </div>
 

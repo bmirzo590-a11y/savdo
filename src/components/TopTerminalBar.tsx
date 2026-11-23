@@ -4,18 +4,22 @@ import {
   Lock,
   Menu,
   Moon,
+  RefreshCw,
   Settings,
   Sun,
 } from 'lucide-react';
-import { LiveSystemStatusSnapshot, ViewId } from '../types/trading';
+import { LiveSystemStatusSnapshot, UnifiedStateSnapshot, ViewId } from '../types/trading';
 
 interface TopTerminalBarProps {
   currentTitle: string;
   status: LiveSystemStatusSnapshot | null;
+  unifiedState?: UnifiedStateSnapshot | null;
   mt5Connected: boolean;
   mt5Login: string;
   unreadNotifs: number;
   darkMode: boolean;
+  refreshing?: boolean;
+  onRefreshAll?: () => void;
   onToggleDarkMode: () => void;
   onOpenMobileMenu: () => void;
   onNavigate: (view: ViewId) => void;
@@ -29,10 +33,6 @@ interface SessionStatus {
 
 function computeUtcSessions(now: Date): SessionStatus[] {
   const utcHour = now.getUTCHours();
-  // Real FX market sessions in UTC:
-  // Asia (Tokyo): 00:00 - 09:00 UTC
-  // London: 07:00 - 16:00 UTC
-  // New York: 12:00 - 21:00 UTC
   const day = now.getUTCDay();
   const isWeekend = day === 6 || (day === 0 && utcHour < 22) || (day === 5 && utcHour >= 22);
   if (isWeekend) {
@@ -52,10 +52,13 @@ function computeUtcSessions(now: Date): SessionStatus[] {
 export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
   currentTitle,
   status,
+  unifiedState,
   mt5Connected,
   mt5Login,
   unreadNotifs,
   darkMode,
+  refreshing,
+  onRefreshAll,
   onToggleDarkMode,
   onOpenMobileMenu,
   onNavigate,
@@ -81,26 +84,35 @@ export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
   const sessions = useMemo(() => computeUtcSessions(now), [now]);
   const activeSessionsLabel = useMemo(() => {
     const open = sessions.filter((s) => s.active).map((s) => s.name);
-    return open.length > 0 ? open.join(' / ') : 'Yopiq (Dam olish)';
+    return open.length > 0 ? open.join(' / ') : 'Dam olish (Kripto 24/7)';
   }, [sessions]);
 
-  const aiLabel = !status
-    ? 'Yuklanmoqda'
-    : status.aiStatus === 'LOCAL_PROXY_READY'
-      ? 'Proksi Tayyor'
-      : status.aiStatus === 'GEMINI_READY'
-        ? 'AI Tayyor'
-        : 'Sozlanmagan';
+  const llmHealth = unifiedState?.llmHealth;
+  const quantActive = (unifiedState?.signalCounts.total ?? 0) > 0;
 
-  const aiColor = !status
-    ? 'text-slate-400'
-    : status.aiStatus === 'UNCONFIGURED'
-      ? 'text-amber-400'
-      : 'text-emerald-400';
+  const aiLabel = !llmHealth
+    ? quantActive
+      ? 'Quant Faol'
+      : 'Yuklanmoqda'
+    : llmHealth.status === 'ACTIVE'
+      ? `Quant + ${llmHealth.provider ?? 'LLM'}`
+      : llmHealth.status === 'ERROR'
+        ? 'Quant Faol · LLM Xato'
+        : 'Quant Faol · LLM Yo‘q';
 
-  const dbLabel = !status
-    ? 'Yuklanmoqda'
-    : `${status.databaseStatus === 'HEALTHY' ? 'Sog‘lom' : 'Tiklangan'} · ${status.dbSizeKb}KB`;
+  const aiColor =
+    llmHealth?.status === 'ACTIVE'
+      ? 'text-emerald-500 dark:text-[#00E5A0]'
+      : llmHealth?.status === 'ERROR'
+        ? 'text-rose-500 dark:text-rose-400'
+        : quantActive
+          ? 'text-sky-500 dark:text-sky-400'
+          : 'text-amber-500 dark:text-amber-400';
+
+  const scannerRunning = (unifiedState?.scanner.status ?? status?.control.scannerStatus) === 'RUNNING';
+  const dbSizeKb = unifiedState?.system?.dbSizeKb ?? status?.dbSizeKb ?? 0;
+  const analysesSaved = unifiedState?.historyCounts.analyses ?? 0;
+  const dbHealthy = (unifiedState?.system?.dbStatus ?? status?.databaseStatus) === 'HEALTHY';
 
   return (
     <header className="h-12 px-3 sm:px-4 border-b border-slate-200 dark:border-violet-500/20 bg-white/95 dark:bg-[#080D1B]/95 backdrop-blur-md flex items-center justify-between gap-3 sticky top-0 z-30">
@@ -119,15 +131,15 @@ export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
             Trade Killer AI
           </span>
           <span aria-hidden="true" className="text-slate-400 dark:text-slate-600">/</span>
-          <span className="font-medium text-slate-700 dark:text-sky-300 truncate max-w-[140px] sm:max-w-[220px]">
+          <span className="font-medium text-slate-700 dark:text-sky-300 truncate max-w-[140px] sm:max-w-[200px]">
             {currentTitle}
           </span>
         </div>
       </div>
 
-      {/* Center: Compact Live Institutional Telemetry Strip */}
-      <div className="hidden xl:flex items-center gap-3 text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400 min-w-0 overflow-hidden">
-        <div className="flex items-center gap-1.5 whitespace-nowrap">
+      {/* Center: Compact Live Verified System Strip */}
+      <div className="hidden xl:flex items-center gap-2.5 text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400 min-w-0 overflow-hidden">
+        <div className="flex items-center gap-1 whitespace-nowrap">
           <span className="font-sans text-slate-400 dark:text-slate-500">Vaqt:</span>
           <span className="text-slate-900 dark:text-slate-100 font-semibold">{localTimeStr}</span>
         </div>
@@ -137,10 +149,10 @@ export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
         <button
           type="button"
           onClick={() => onNavigate('calendar')}
-          className="flex items-center gap-1.5 whitespace-nowrap hover:text-sky-400 transition-colors cursor-pointer"
+          className="flex items-center gap-1 whitespace-nowrap hover:text-sky-400 transition-colors cursor-pointer"
         >
           <span className="font-sans text-slate-400 dark:text-slate-500">Sessiya:</span>
-          <span className={sessions.some((s) => s.active) ? 'text-sky-500 dark:text-sky-400 font-semibold' : 'text-slate-500'}>
+          <span className={sessions.some((s) => s.active) ? 'text-sky-500 dark:text-sky-400 font-semibold' : 'text-slate-500 dark:text-slate-300'}>
             {activeSessionsLabel}
           </span>
         </button>
@@ -150,24 +162,11 @@ export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
         <button
           type="button"
           onClick={() => onNavigate('settings')}
-          className="flex items-center gap-1.5 whitespace-nowrap hover:text-sky-400 transition-colors cursor-pointer"
+          className="flex items-center gap-1 whitespace-nowrap hover:text-sky-400 transition-colors cursor-pointer"
         >
           <span className="font-sans text-slate-400 dark:text-slate-500">MT5:</span>
-          <span className={mt5Connected ? 'text-emerald-500 dark:text-[#00E5A0] font-semibold' : 'text-amber-500 dark:text-amber-400 font-semibold'}>
-            {mt5Connected ? `Ulangan #${mt5Login}` : 'Uzilgan (Demo)'}
-          </span>
-        </button>
-
-        <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
-
-        <button
-          type="button"
-          onClick={() => onNavigate('monitor')}
-          className="flex items-center gap-1.5 whitespace-nowrap hover:text-sky-400 transition-colors cursor-pointer"
-        >
-          <span className="font-sans text-slate-400 dark:text-slate-500">VPS:</span>
-          <span className={status?.serverOnline ? 'text-emerald-500 dark:text-[#00E5A0] font-semibold' : 'text-rose-500 font-semibold'}>
-            {status?.serverOnline ? 'Faol' : status ? 'Uzilgan' : '...'}
+          <span className={mt5Connected ? 'text-emerald-500 dark:text-[#00E5A0] font-semibold' : 'text-rose-500 dark:text-rose-400 font-semibold'}>
+            {mt5Connected ? `#${mt5Login} (LIVE)` : 'DISCONNECTED'}
           </span>
         </button>
 
@@ -176,7 +175,8 @@ export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
         <button
           type="button"
           onClick={() => onNavigate('analyst')}
-          className="flex items-center gap-1.5 whitespace-nowrap hover:text-violet-400 transition-colors cursor-pointer"
+          className="flex items-center gap-1 whitespace-nowrap hover:text-violet-400 transition-colors cursor-pointer"
+          title={llmHealth?.lastError ?? undefined}
         >
           <span className="font-sans text-slate-400 dark:text-slate-500">AI:</span>
           <span className={`${aiColor} font-semibold`}>{aiLabel}</span>
@@ -186,19 +186,43 @@ export const TopTerminalBar: React.FC<TopTerminalBarProps> = ({
 
         <button
           type="button"
+          onClick={() => onNavigate('scanner')}
+          className="flex items-center gap-1 whitespace-nowrap hover:text-sky-400 transition-colors cursor-pointer"
+        >
+          <span className="font-sans text-slate-400 dark:text-slate-500">Skaner:</span>
+          <span className={scannerRunning ? 'text-emerald-500 dark:text-[#00E5A0] font-semibold' : 'text-amber-500 font-semibold'}>
+            {unifiedState?.scanInProgress ? 'Skanerlash...' : scannerRunning ? '24/7 Faol' : 'Pauza'}
+          </span>
+        </button>
+
+        <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
+
+        <button
+          type="button"
           onClick={() => onNavigate('memory')}
-          className="flex items-center gap-1.5 whitespace-nowrap hover:text-violet-400 transition-colors cursor-pointer"
+          className="flex items-center gap-1 whitespace-nowrap hover:text-violet-400 transition-colors cursor-pointer"
         >
           <span className="font-sans text-slate-400 dark:text-slate-500">DB:</span>
-          <span className="text-slate-700 dark:text-slate-200 font-semibold">{dbLabel}</span>
+          <span className={dbHealthy ? 'text-slate-700 dark:text-slate-200 font-semibold' : 'text-amber-400 font-semibold'}>
+            {dbSizeKb}KB · {analysesSaved} tahlil
+          </span>
         </button>
       </div>
 
       {/* Right: Functional Action Controls */}
       <div className="flex items-center gap-1.5 shrink-0">
-        <span className="xl:hidden font-mono tabular-nums text-[11px] text-slate-500 dark:text-slate-400 mr-1 hidden sm:inline">
-          {localTimeStr}
-        </span>
+        {onRefreshAll && (
+          <button
+            type="button"
+            onClick={onRefreshAll}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-700 dark:text-sky-300 hover:bg-sky-500/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+            title="Real bozor ma’lumoti va tahlillarni yangilash"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <span className="hidden md:inline">Yangilash</span>
+          </button>
+        )}
 
         <button
           type="button"

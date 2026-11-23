@@ -1,5 +1,6 @@
 export type ViewId =
   | 'dashboard'
+  | 'aichat'
   | 'analyst'
   | 'scanner'
   | 'strategies'
@@ -24,7 +25,8 @@ export type OrderType = 'MARKET' | 'LIMIT';
 export type Timeframe = 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1' | 'W1';
 export type TradingStyle = 'SCALPING' | 'LONG_TERM';
 export type PositionStatus = 'OPEN' | 'CLOSED' | 'PENDING';
-export type AssetClass = 'FOREX' | 'METAL' | 'CRYPTO' | 'INDEX' | 'ENERGY';
+export type AssetClass = 'FOREX' | 'METAL' | 'CRYPTO' | 'INDEX' | 'ENERGY' | 'OTHER';
+export type Mt5ConnectionStatus = 'LIVE' | 'DELAYED' | 'STALE' | 'DISCONNECTED' | 'DATA UNAVAILABLE';
 
 export interface CandlePoint {
   time: string;
@@ -949,4 +951,592 @@ export interface LocalMemoryOverview {
     pnlUsd: number;
   }[];
 }
+
+/* ---------------- UNIFIED REAL BACKEND ENGINE TYPES ---------------- */
+export type EnsembleStrategyCategory =
+  | 'TREND'
+  | 'MOMENTUM'
+  | 'VOLATILITY'
+  | 'PRICE_ACTION'
+  | 'SMC_ICT'
+  | 'VOLUME';
+
+export interface EnsembleStrategyRecord {
+  id: string;
+  name: string;
+  category: EnsembleStrategyCategory;
+  family: string;
+  weight: number;
+  enabled: boolean;
+  approved: boolean;
+  regimes: string[];
+  lastSignal: 'BUY' | 'SELL' | 'WAIT';
+  lastConfidence: number;
+  lastReasonUz: string;
+  lastEvaluatedAt: string | null;
+  totalEvaluations: number;
+  signalsProduced: number;
+}
+
+export type ScannerInstrumentStatus =
+  | 'SCANNING'
+  | 'ANALYZING'
+  | 'SIGNAL FOUND'
+  | 'WAIT'
+  | 'DATA UNAVAILABLE'
+  | 'ERROR';
+
+export interface ScannerInstrumentState {
+  symbol: string;
+  timeframe: string;
+  status: ScannerInstrumentStatus;
+  dataSource: string;
+  freshnessSec: number | null;
+  lastCandleTimeIso: string | null;
+  newCandleDetected: boolean;
+  lastScannedAt: string | null;
+  analysisId: string | null;
+  decision: 'BUY' | 'SELL' | 'WAIT' | 'DATA_UNAVAILABLE';
+  confidence: number;
+  error: string | null;
+}
+
+export interface StrategyEvaluationResult {
+  strategyId: string;
+  strategyName: string;
+  category: EnsembleStrategyCategory;
+  family: string;
+  enabled: boolean;
+  approved: boolean;
+  regimeMatched: boolean;
+  weight: number;
+  effectiveWeight: number;
+  signal: 'BUY' | 'SELL' | 'WAIT';
+  confidence: number;
+  evidenceUz: string;
+}
+
+export interface UnifiedRiskEvaluation {
+  allowed: boolean;
+  riskPerTradePct: number;
+  riskPerTradeUsd: number;
+  portfolioRiskPct: number;
+  maxPortfolioRiskPct: number;
+  maxDrawdownPct: number;
+  currentDrawdownPct: number;
+  dailyLossUsd: number;
+  dailyMaxLossUsd: number;
+  marginRequiredUsd: number;
+  marginFreeUsd: number;
+  marginUsagePct: number;
+  totalExposureUsd: number;
+  correlatedOpenCount: number;
+  maxCorrelatedExposure: number;
+  recommendedLot: number;
+  blockReasons: string[];
+}
+
+export interface UnifiedAnalysisRecord {
+  analysisId: string;
+  symbol: string;
+  timeframe: string;
+  timestamp: string;
+  status: 'OK' | 'DATA_UNAVAILABLE' | 'ERROR';
+  dataSource: string;
+  dataFreshnessSec: number | null;
+  barsCount: number;
+  latestPrice: number | null;
+  change24hPct: number | null;
+  high24h: number | null;
+  low24h: number | null;
+  volume24h: number | null;
+  marketRegime: string;
+  marketRegimeUz: string;
+  marketStructure: string;
+  candlestickSummary: string;
+  smcSummary: string;
+  mtfSummary: {
+    timeframesChecked: string[];
+    availableTimeframes: string[];
+    macroBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    setupBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    entryBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    alignmentPct: number;
+    conflictDetected: boolean;
+    entries: {
+      timeframe: string;
+      bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      rsi14: number;
+      adx14: number;
+      close: number;
+      source: string;
+    }[];
+  };
+  indicators: {
+    ema9: number;
+    ema20: number;
+    ema50: number;
+    ema100: number;
+    ema200: number;
+    rsi14: number;
+    macdLine: number;
+    macdSignal: number;
+    macdHist: number;
+    adx14: number;
+    plusDi: number;
+    minusDi: number;
+    atr14: number;
+    atrPct: number;
+    bbUpper: number;
+    bbMiddle: number;
+    bbLower: number;
+    vwap: number;
+    volumeRatio: number;
+    obvTrend: string;
+    fibZone: string;
+  } | null;
+  strategyResults: StrategyEvaluationResult[];
+  ensemble: {
+    activeStrategiesCount: number;
+    totalStrategiesCount: number;
+    buyVotes: number;
+    sellVotes: number;
+    waitVotes: number;
+    weightedBuyScore: number;
+    weightedSellScore: number;
+    contradictionDetected: boolean;
+    duplicateFamilyDiscountApplied: boolean;
+    strategyConfirmation: string;
+  };
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskRewardRatio: number | null;
+  confidence: number;
+  decision: 'BUY' | 'SELL' | 'WAIT' | 'DATA_UNAVAILABLE';
+  explanationUz: string;
+  risk: UnifiedRiskEvaluation | null;
+  llmStatus: 'ACTIVE' | 'UNCONFIGURED' | 'ERROR' | 'SKIPPED';
+  llmProvider: string | null;
+  llmSummaryUz: string | null;
+  llmError: string | null;
+  error: string | null;
+}
+
+export interface UnifiedSignalItem {
+  analysisId: string;
+  symbol: string;
+  timeframe: string;
+  decision: 'BUY' | 'SELL' | 'WAIT' | 'DATA_UNAVAILABLE';
+  confidence: number;
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskRewardRatio: number | null;
+  strategyConfirmation: string;
+  timestamp: string;
+  dataSource: string;
+  dataFreshnessSec: number | null;
+  marketRegimeUz: string;
+}
+
+export interface PersistentOrderRecord {
+  id: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  orderType: 'MARKET' | 'LIMIT';
+  entryPrice: number;
+  markPrice: number;
+  lotSize: number;
+  sizeUsdt: number;
+  leverage: number;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  status: 'OPEN' | 'PENDING' | 'CLOSED';
+  strategyName: string;
+  analysisId: string | null;
+  riskPct: number;
+  riskUsd: number;
+  executionMode: 'TEST_SIM' | 'MT5_DEMO' | 'MT5_REAL';
+  openedAt: string;
+  closedAt?: string;
+  realizedPnl?: number;
+  profit?: number;
+  notesUz?: string;
+}
+
+export interface PersistentRiskSettings {
+  dailyMaxLossUsd: number;
+  maxOpenPositions: number;
+  maxDrawdownPct: number;
+  riskPerTradePct: number;
+  maxPortfolioRiskPct: number;
+  maxMarginUsagePct: number;
+  maxCorrelatedExposure: number;
+  maxSpreadPoints: number;
+  maxVolatilityAtrPct: number;
+  testAccountBalanceUsd: number;
+}
+
+export interface LlmHealthRecord {
+  status: 'ACTIVE' | 'UNCONFIGURED' | 'ERROR';
+  provider: string | null;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+}
+
+export interface TimeframeHistoryMeta {
+  timeframe: Timeframe;
+  barsCount: number;
+  firstCandleIso: string | null;
+  lastCandleIso: string | null;
+  updatedAt: string;
+}
+
+export interface Mt5DataSourceRow {
+  instrument: string;
+  brokerSymbol: string;
+  dataSource: 'MT5 BROKER';
+  bid: number | null;
+  ask: number | null;
+  last: number | null;
+  spreadPoints: number | null;
+  lastTickTime: string | null;
+  tickTimeMs: number | null;
+  dataAgeSec: number | null;
+  historicalBars: number;
+  timeframesAvailable: Timeframe[];
+  barsByTimeframe: Partial<Record<Timeframe, TimeframeHistoryMeta>>;
+  connectionStatus: Mt5ConnectionStatus;
+  assetClass: string;
+  digits: number;
+  point: number;
+  tickSize: number;
+  tickValue: number;
+  contractSize: number;
+  volumeMin: number;
+  volumeMax: number;
+  volumeStep: number;
+  tradeMode: number;
+  tradeModeLabel: string;
+  tradable: boolean;
+  visible: boolean;
+  tradingSession: string;
+  description: string;
+  tickVolume: number | null;
+  realVolume: number | null;
+}
+
+export interface Mt5ConnectionStateSnapshot {
+  connected: boolean;
+  bridgeUrl: string;
+  autoSync: boolean;
+  pollingIntervalMs: number;
+  historyTargetYears: number;
+  lastSyncAt: string | null;
+  lastHeartbeatMs: number | null;
+  lastError: string | null;
+  disconnectReasonUz: string | null;
+  reconnectAttempts: number;
+  terminal: {
+    connected: boolean;
+    tradeAllowed: boolean;
+    company: string;
+    name: string;
+    build: number;
+  } | null;
+  account: {
+    login: number;
+    server: string;
+    company: string;
+    balance: number;
+    equity: number;
+    margin: number;
+    marginFree: number;
+    marginLevel: number;
+    profit: number;
+    realizedToday: number;
+    tradeMode: 'REAL' | 'DEMO' | 'CONTEST';
+    tradeAllowed: boolean;
+    investorReadOnly: boolean;
+    currency: string;
+    leverage: number;
+  } | null;
+  totalBrokerSymbolsCount: number;
+  visibleSymbolsCount: number;
+}
+
+export interface Mt5DataSourcesSnapshot {
+  timestamp: string;
+  mode: 'MT5_ONLY';
+  externalApisDisabled: boolean;
+  connection: Mt5ConnectionStateSnapshot;
+  summary: {
+    totalSymbols: number;
+    visibleSymbols: number;
+    liveCount: number;
+    delayedCount: number;
+    staleCount: number;
+    disconnectedCount: number;
+    unavailableCount: number;
+    totalHistoricalBars: number;
+  };
+  rows: Mt5DataSourceRow[];
+}
+
+export interface UnifiedInstrumentSummary {
+  symbol: string;
+  brokerSymbol?: string;
+  instrument?: string;
+  base: string;
+  quote: string;
+  assetClass: string;
+  contractSize: number;
+  tickSize: number;
+  tickValue?: number;
+  digits?: number;
+  point: number;
+  volumeMin?: number;
+  volumeMax?: number;
+  volumeStep?: number;
+  spreadPoints: number;
+  tradingSession: string;
+  tradable?: boolean;
+  visible?: boolean;
+  bid?: number | null;
+  ask?: number | null;
+  price: number | null;
+  change24h: number | null;
+  high24h: number | null;
+  low24h: number | null;
+  volume24h: number | null;
+  rsi14: number | null;
+  trend: 'Ko‘tarilish' | 'Pasayish' | 'Yonlama';
+  dataSource: string;
+  connectionStatus?: Mt5ConnectionStatus;
+  lastTickTime?: string | null;
+  freshnessSec: number | null;
+  historicalBars?: number;
+  timeframesAvailable?: Timeframe[];
+  analysisId: string | null;
+  scannerStatus: ScannerInstrumentStatus;
+  lastAnalyzedAt: string | null;
+}
+
+export interface UnifiedAccountSummary {
+  balance: number;
+  equity: number;
+  floatingPnl: number;
+  realizedTodayPnl: number;
+  dailyPnl: number;
+  marginUsed: number;
+  marginFree: number;
+  marginLevel?: number;
+  marginUsagePct: number;
+  portfolioRiskPct: number;
+  currentDrawdownPct: number;
+  totalExposureUsd: number;
+  openCount: number;
+  pendingCount: number;
+  closedCount: number;
+  source?: 'MT5_BROKER' | 'MT5_DISCONNECTED';
+}
+
+export interface UnifiedStateSnapshot {
+  timestamp: string;
+  dataMode?: 'MT5_ONLY';
+  mt5Connection?: Mt5ConnectionStateSnapshot;
+  dataSources?: Mt5DataSourcesSnapshot;
+  instruments: UnifiedInstrumentSummary[];
+  analysesBySymbol: Record<string, UnifiedAnalysisRecord>;
+  signals: UnifiedSignalItem[];
+  signalCounts: {
+    total: number;
+    buy: number;
+    sell: number;
+    wait: number;
+    unavailable: number;
+  };
+  ensembleStrategies: EnsembleStrategyRecord[];
+  activeStrategiesCount: number;
+  totalStrategiesCount: number;
+  scannerStates: Record<string, ScannerInstrumentState>;
+  orders: PersistentOrderRecord[];
+  account: UnifiedAccountSummary;
+  riskSettings: PersistentRiskSettings;
+  llmHealth: LlmHealthRecord;
+  scanner: {
+    status: 'RUNNING' | 'PAUSED';
+    lastScanAt: string | null;
+    instrumentsScanned: number;
+    newCandlesDetected: number;
+  };
+  historyCounts: {
+    analyses: number;
+    signals: number;
+    orders: number;
+    notifications: number;
+  };
+  control?: ControlStateRecord;
+  engineMetrics?: EngineMetricsRecord;
+  scannerLoopActive?: boolean;
+  scanInProgress?: boolean;
+  system?: {
+    serverOnline: boolean;
+    serverUptimeSec: number;
+    dbStatus: 'HEALTHY' | 'RECOVERED';
+    dbSizeKb: number;
+    memoryUsedPct: number;
+    aiConfigured: boolean;
+    aiProvider: string | null;
+  };
+}
+
+export interface RealOhlcApiResponse {
+  ok: boolean;
+  symbol: string;
+  brokerSymbol?: string;
+  timeframe: Timeframe;
+  source: string;
+  connectionStatus?: Mt5ConnectionStatus;
+  fetchedAt: string;
+  freshnessSec: number | null;
+  latestPrice: number | null;
+  bid?: number | null;
+  ask?: number | null;
+  spreadPoints?: number | null;
+  change24hPct: number | null;
+  high24h: number | null;
+  low24h: number | null;
+  volume24h: number | null;
+  barsCount: number;
+  candles: CandlePoint[];
+  error: string | null;
+}
+
+/* ---------------- AUTONOMOUS AI THINKING & 6-CHAT MULTI-AGENT TYPES ---------------- */
+export type AiChatId =
+  | 'chief_analyst'
+  | 'market_intelligence'
+  | 'strategy_analyst'
+  | 'risk_intelligence'
+  | 'trade_manager'
+  | 'self_evaluation';
+
+export type AiChatTriggerType =
+  | 'USER_QUERY'
+  | 'MANUAL_BRIEF'
+  | 'NEW_CANDLE'
+  | 'REGIME_CHANGE'
+  | 'VALID_SETUP'
+  | 'POSITION_UPDATE'
+  | 'TRADE_CLOSED';
+
+export interface AiStructuredTradeDecision {
+  instrument: string;
+  marketCondition: string;
+  decision: 'BUY' | 'SELL' | 'WAIT';
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskReward: string | null;
+  strategyAgreement: string;
+  confidenceCalibration: string;
+  reasoningSummary: string;
+  invalidationConditions: string;
+  executionStatus: 'ANALYSIS_ONLY_NOT_EXECUTED' | 'RISK_BLOCKED' | 'EXECUTED_VIA_ENGINE';
+  linkedOrderId?: string | null;
+}
+
+export interface AiTradeManagerProposal {
+  orderId: string;
+  symbol: string;
+  proposedAction: 'HOLD' | 'MOVE_SL' | 'MOVE_TP' | 'BREAK_EVEN' | 'TRAILING_STOP' | 'CLOSE_POSITION';
+  proposedStopLoss: number | null;
+  proposedTakeProfit: number | null;
+  rationaleUz: string;
+  riskCheckAllowed: boolean;
+  riskBlockReasons: string[];
+  executionStatus: 'PROPOSED_ONLY' | 'EXECUTED' | 'BLOCKED_BY_RISK_OR_PERMISSION';
+  executedAt?: string | null;
+}
+
+export interface AiChatMessageRecord {
+  messageId: string;
+  chatId: AiChatId;
+  role: 'ai' | 'user' | 'system_notice';
+  contentUz: string;
+  provider: string | null;
+  model: string | null;
+  createdAt: string;
+  triggerType: AiChatTriggerType;
+  analysisId: string | null;
+  symbol?: string | null;
+  dataSnapshotRef: string;
+  dataFreshnessSec: number | null;
+  sourceReferences: string[];
+  generationStatus: 'GENERATED' | 'USER_INPUT' | 'AI_UNAVAILABLE' | 'LLM_ERROR' | 'RATE_LIMITED' | 'TIMEOUT';
+  errorDetail?: string | null;
+  dedupKey?: string | null;
+  tradeDecision?: AiStructuredTradeDecision | null;
+  tradeManagerAction?: AiTradeManagerProposal | null;
+}
+
+export interface AiChatDefinitionSummary {
+  id: AiChatId;
+  title: string;
+  shortTitle: string;
+  roleUz: string;
+  descriptionUz: string;
+  quickPrompts: string[];
+  messageCount: number;
+  aiMessageCount: number;
+  lastMessageAt: string | null;
+  lastAiAnalysisId: string | null;
+}
+
+export interface StrategySelfEvalMemoryRecord {
+  id: string;
+  orderId: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  exitPrice: number;
+  realizedPnlUsd: number;
+  mfeUsd: number | null;
+  maeUsd: number | null;
+  originalAnalysisId: string | null;
+  originalDecision: string | null;
+  originalStrategyVotes: string | null;
+  marketConditionUz: string | null;
+  lessonSummaryUz: string;
+  messageId: string;
+  provider: string;
+  model: string;
+  evaluatedAt: string;
+}
+
+export interface AiChatsStateSnapshot {
+  timestamp: string;
+  provider: {
+    configured: boolean;
+    providerLabel: string | null;
+    model: string | null;
+    healthStatus: 'ACTIVE' | 'UNCONFIGURED' | 'ERROR';
+    lastCheckedAt: string | null;
+    lastError: string | null;
+  };
+  queue: {
+    pendingCount: number;
+    processing: boolean;
+    lastProcessedAt: string | null;
+    totalAutonomousProcessed: number;
+    totalDuplicatesSkipped: number;
+  };
+  chats: AiChatDefinitionSummary[];
+  messagesByChat: Record<AiChatId, AiChatMessageRecord[]>;
+  strategySelfEvalMemory: StrategySelfEvalMemoryRecord[];
+}
+
+
 

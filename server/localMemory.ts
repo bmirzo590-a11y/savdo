@@ -190,12 +190,371 @@ export interface ControlStateRecord {
   allowRealAccountTrading: boolean;
 }
 
+export type EnsembleStrategyCategory =
+  | 'TREND'
+  | 'MOMENTUM'
+  | 'VOLATILITY'
+  | 'PRICE_ACTION'
+  | 'SMC_ICT'
+  | 'VOLUME';
+
+export interface EnsembleStrategyRecord {
+  id: string;
+  name: string;
+  category: EnsembleStrategyCategory;
+  family: string;
+  weight: number;
+  enabled: boolean;
+  approved: boolean;
+  regimes: string[];
+  lastSignal: 'BUY' | 'SELL' | 'WAIT';
+  lastConfidence: number;
+  lastReasonUz: string;
+  lastEvaluatedAt: string | null;
+  totalEvaluations: number;
+  signalsProduced: number;
+}
+
+export type ScannerInstrumentStatus =
+  | 'SCANNING'
+  | 'ANALYZING'
+  | 'SIGNAL FOUND'
+  | 'WAIT'
+  | 'DATA UNAVAILABLE'
+  | 'ERROR';
+
+export interface ScannerInstrumentState {
+  symbol: string;
+  timeframe: string;
+  status: ScannerInstrumentStatus;
+  dataSource: string;
+  freshnessSec: number | null;
+  lastCandleTimeIso: string | null;
+  newCandleDetected: boolean;
+  lastScannedAt: string | null;
+  analysisId: string | null;
+  decision: 'BUY' | 'SELL' | 'WAIT' | 'DATA_UNAVAILABLE';
+  confidence: number;
+  error: string | null;
+}
+
+export interface StrategyEvaluationResult {
+  strategyId: string;
+  strategyName: string;
+  category: EnsembleStrategyCategory;
+  family: string;
+  enabled: boolean;
+  approved: boolean;
+  regimeMatched: boolean;
+  weight: number;
+  effectiveWeight: number;
+  signal: 'BUY' | 'SELL' | 'WAIT';
+  confidence: number;
+  evidenceUz: string;
+}
+
+export interface UnifiedRiskEvaluation {
+  allowed: boolean;
+  riskPerTradePct: number;
+  riskPerTradeUsd: number;
+  portfolioRiskPct: number;
+  maxPortfolioRiskPct: number;
+  maxDrawdownPct: number;
+  currentDrawdownPct: number;
+  dailyLossUsd: number;
+  dailyMaxLossUsd: number;
+  marginRequiredUsd: number;
+  marginFreeUsd: number;
+  marginUsagePct: number;
+  totalExposureUsd: number;
+  correlatedOpenCount: number;
+  maxCorrelatedExposure: number;
+  recommendedLot: number;
+  blockReasons: string[];
+}
+
+export interface UnifiedAnalysisRecord {
+  analysisId: string;
+  symbol: string;
+  timeframe: string;
+  timestamp: string;
+  status: 'OK' | 'DATA_UNAVAILABLE' | 'ERROR';
+  dataSource: string;
+  dataFreshnessSec: number | null;
+  barsCount: number;
+  latestPrice: number | null;
+  change24hPct: number | null;
+  high24h: number | null;
+  low24h: number | null;
+  volume24h: number | null;
+  marketRegime: string;
+  marketRegimeUz: string;
+  marketStructure: string;
+  candlestickSummary: string;
+  smcSummary: string;
+  mtfSummary: {
+    timeframesChecked: string[];
+    availableTimeframes: string[];
+    macroBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    setupBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    entryBias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+    alignmentPct: number;
+    conflictDetected: boolean;
+    entries: {
+      timeframe: string;
+      bias: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+      rsi14: number;
+      adx14: number;
+      close: number;
+      source: string;
+    }[];
+  };
+  indicators: {
+    ema9: number;
+    ema20: number;
+    ema50: number;
+    ema100: number;
+    ema200: number;
+    rsi14: number;
+    macdLine: number;
+    macdSignal: number;
+    macdHist: number;
+    adx14: number;
+    plusDi: number;
+    minusDi: number;
+    atr14: number;
+    atrPct: number;
+    bbUpper: number;
+    bbMiddle: number;
+    bbLower: number;
+    vwap: number;
+    volumeRatio: number;
+    obvTrend: string;
+    fibZone: string;
+  } | null;
+  strategyResults: StrategyEvaluationResult[];
+  ensemble: {
+    activeStrategiesCount: number;
+    totalStrategiesCount: number;
+    buyVotes: number;
+    sellVotes: number;
+    waitVotes: number;
+    weightedBuyScore: number;
+    weightedSellScore: number;
+    contradictionDetected: boolean;
+    duplicateFamilyDiscountApplied: boolean;
+    strategyConfirmation: string;
+  };
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskRewardRatio: number | null;
+  confidence: number;
+  decision: 'BUY' | 'SELL' | 'WAIT' | 'DATA_UNAVAILABLE';
+  explanationUz: string;
+  risk: UnifiedRiskEvaluation | null;
+  llmStatus: 'ACTIVE' | 'UNCONFIGURED' | 'ERROR' | 'SKIPPED';
+  llmProvider: string | null;
+  llmSummaryUz: string | null;
+  llmError: string | null;
+  error: string | null;
+}
+
+export interface PersistentOrderRecord {
+  id: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  orderType: 'MARKET' | 'LIMIT';
+  entryPrice: number;
+  markPrice: number;
+  lotSize: number;
+  sizeUsdt: number;
+  leverage: number;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  status: 'OPEN' | 'PENDING' | 'CLOSED';
+  strategyName: string;
+  analysisId: string | null;
+  riskPct: number;
+  riskUsd: number;
+  executionMode: 'TEST_SIM' | 'MT5_DEMO' | 'MT5_REAL';
+  openedAt: string;
+  closedAt?: string;
+  realizedPnl?: number;
+  notesUz?: string;
+  mfeUsd?: number;
+  maeUsd?: number;
+  highestPrice?: number;
+  lowestPrice?: number;
+  originalDecision?: string | null;
+  originalRegimeUz?: string | null;
+  originalStrategyVotes?: string | null;
+}
+
+export interface PersistentRiskSettings {
+  dailyMaxLossUsd: number;
+  maxOpenPositions: number;
+  maxDrawdownPct: number;
+  riskPerTradePct: number;
+  maxPortfolioRiskPct: number;
+  maxMarginUsagePct: number;
+  maxCorrelatedExposure: number;
+  maxSpreadPoints: number;
+  maxVolatilityAtrPct: number;
+  testAccountBalanceUsd: number;
+}
+
+export interface LlmHealthRecord {
+  status: 'ACTIVE' | 'UNCONFIGURED' | 'ERROR';
+  provider: string | null;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+}
+
+export type AiChatId =
+  | 'chief_analyst'
+  | 'market_intelligence'
+  | 'strategy_analyst'
+  | 'risk_intelligence'
+  | 'trade_manager'
+  | 'self_evaluation';
+
+export type AiChatTriggerType =
+  | 'USER_QUERY'
+  | 'MANUAL_BRIEF'
+  | 'NEW_CANDLE'
+  | 'REGIME_CHANGE'
+  | 'VALID_SETUP'
+  | 'POSITION_UPDATE'
+  | 'TRADE_CLOSED';
+
+export interface AiStructuredTradeDecision {
+  instrument: string;
+  marketCondition: string;
+  decision: 'BUY' | 'SELL' | 'WAIT';
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  riskReward: string | null;
+  strategyAgreement: string;
+  confidenceCalibration: string;
+  reasoningSummary: string;
+  invalidationConditions: string;
+  executionStatus: 'ANALYSIS_ONLY_NOT_EXECUTED' | 'RISK_BLOCKED' | 'EXECUTED_VIA_ENGINE';
+  linkedOrderId?: string | null;
+}
+
+export interface AiTradeManagerProposal {
+  orderId: string;
+  symbol: string;
+  proposedAction: 'HOLD' | 'MOVE_SL' | 'MOVE_TP' | 'BREAK_EVEN' | 'TRAILING_STOP' | 'CLOSE_POSITION';
+  proposedStopLoss: number | null;
+  proposedTakeProfit: number | null;
+  rationaleUz: string;
+  riskCheckAllowed: boolean;
+  riskBlockReasons: string[];
+  executionStatus: 'PROPOSED_ONLY' | 'EXECUTED' | 'BLOCKED_BY_RISK_OR_PERMISSION';
+  executedAt?: string | null;
+}
+
+export interface AiChatMessageRecord {
+  messageId: string;
+  chatId: AiChatId;
+  role: 'ai' | 'user' | 'system_notice';
+  contentUz: string;
+  provider: string | null;
+  model: string | null;
+  createdAt: string;
+  triggerType: AiChatTriggerType;
+  analysisId: string | null;
+  symbol?: string | null;
+  dataSnapshotRef: string;
+  dataFreshnessSec: number | null;
+  sourceReferences: string[];
+  generationStatus: 'GENERATED' | 'USER_INPUT' | 'AI_UNAVAILABLE' | 'LLM_ERROR' | 'RATE_LIMITED' | 'TIMEOUT';
+  errorDetail?: string | null;
+  dedupKey?: string | null;
+  tradeDecision?: AiStructuredTradeDecision | null;
+  tradeManagerAction?: AiTradeManagerProposal | null;
+}
+
+export interface StrategySelfEvalMemoryRecord {
+  id: string;
+  orderId: string;
+  symbol: string;
+  side: 'LONG' | 'SHORT';
+  entryPrice: number;
+  exitPrice: number;
+  realizedPnlUsd: number;
+  mfeUsd: number | null;
+  maeUsd: number | null;
+  originalAnalysisId: string | null;
+  originalDecision: string | null;
+  originalStrategyVotes: string | null;
+  marketConditionUz: string | null;
+  lessonSummaryUz: string;
+  messageId: string;
+  provider: string;
+  model: string;
+  evaluatedAt: string;
+}
+
+export const ALL_AI_CHAT_IDS: AiChatId[] = [
+  'chief_analyst',
+  'market_intelligence',
+  'strategy_analyst',
+  'risk_intelligence',
+  'trade_manager',
+  'self_evaluation',
+];
+
+export interface Mt5BridgeConfigRecord {
+  bridgeUrl: string;
+  autoSync: boolean;
+  pollingIntervalMs: number;
+  historyTargetYears: number;
+}
+
+export interface Mt5CachedSymbolSpec {
+  brokerSymbol: string;
+  instrument: string;
+  base: string;
+  quote: string;
+  marginCurrency?: string;
+  assetClass: string;
+  description: string;
+  path: string;
+  digits: number;
+  point: number;
+  tickSize: number;
+  tickValue: number;
+  contractSize: number;
+  volumeMin: number;
+  volumeMax: number;
+  volumeStep: number;
+  spreadPoints: number;
+  tradeMode: number;
+  tradeModeLabel: string;
+  tradable: boolean;
+  visible: boolean;
+  selected: boolean;
+  tradingSession: string;
+}
+
 export interface LocalMemoryDatabase {
   schemaVersion: number;
   createdAt: string;
   updatedAt: string;
+  mt5Config: Mt5BridgeConfigRecord;
+  mt5SymbolsCache: Mt5CachedSymbolSpec[];
   control: ControlStateRecord;
   strategies: StrategyRegistryRecord[];
+  ensembleStrategies: EnsembleStrategyRecord[];
+  unifiedAnalyses: Record<string, UnifiedAnalysisRecord>;
+  scannerStates: Record<string, ScannerInstrumentState>;
+  orders: PersistentOrderRecord[];
+  riskSettings: PersistentRiskSettings;
+  llmHealth: LlmHealthRecord;
   notifications: SystemNotificationRecord[];
   analyses: HistoricalAnalysisRecord[];
   signals: HistoricalSignalRecord[];
@@ -204,6 +563,9 @@ export interface LocalMemoryDatabase {
   perSymbolReports: Record<string, InstrumentAnalysisSnapshot>;
   executionLogs: ExecutionLogEntry[];
   executedSignalHashes: ExecutedSignalRecord[];
+  aiChats: Record<AiChatId, AiChatMessageRecord[]>;
+  aiChatDedupIndex: Record<string, string>;
+  strategySelfEvalMemory: StrategySelfEvalMemoryRecord[];
 }
 
 function seedDefaultStrategies(): StrategyRegistryRecord[] {
@@ -394,13 +756,112 @@ function createDefaultEngineMetrics(): EngineMetricsRecord {
   };
 }
 
+export function seedDefaultEnsembleStrategies(): EnsembleStrategyRecord[] {
+  const base = (
+    id: string,
+    name: string,
+    category: EnsembleStrategyCategory,
+    family: string,
+    weight: number,
+    regimes: string[]
+  ): EnsembleStrategyRecord => ({
+    id,
+    name,
+    category,
+    family,
+    weight,
+    enabled: true,
+    approved: true,
+    regimes,
+    lastSignal: 'WAIT',
+    lastConfidence: 0,
+    lastReasonUz: 'Hali baholanmagan',
+    lastEvaluatedAt: null,
+    totalEvaluations: 0,
+    signalsProduced: 0,
+  });
+
+  return [
+    base('ema-trend', 'EMA Trend (9/20/50/100/200)', 'TREND', 'moving-average', 1.25, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Breakout']),
+    base('rsi', 'RSI (14) Momentum & Extremes', 'MOMENTUM', 'oscillator', 1.0, ['Sideways / Range', 'Reversal', 'Accumulation', 'Distribution']),
+    base('macd', 'MACD (12/26/9) Histogram', 'MOMENTUM', 'oscillator', 1.05, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Breakout', 'Reversal']),
+    base('adx', 'ADX (14) & ±DI Trend Strength', 'TREND', 'trend-strength', 1.15, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Breakout']),
+    base('bollinger-bands', 'Bollinger Bands & Squeeze', 'VOLATILITY', 'volatility-bands', 1.0, ['Sideways / Range', 'Low Volatility', 'Breakout']),
+    base('vwap', 'VWAP ±σ Institutional Bands', 'VOLATILITY', 'volatility-bands', 1.1, ['Sideways / Range', 'High Volatility', 'Accumulation', 'Distribution']),
+    base('price-action', 'Price Action Swing Structure', 'PRICE_ACTION', 'price-structure', 1.2, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Reversal', 'Breakout']),
+    base('candlestick', 'Candlestick Pattern Engine', 'PRICE_ACTION', 'candlestick', 1.15, ['Reversal', 'Sideways / Range', 'Accumulation', 'Distribution']),
+    base('fibonacci', 'Fibonacci Retracement & OTE', 'PRICE_ACTION', 'key-levels', 0.95, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Reversal']),
+    base('breakout', 'Chart & Range Breakout', 'PRICE_ACTION', 'breakout', 1.2, ['Breakout', 'Low Volatility', 'Strong Bullish Trend', 'Strong Bearish Trend']),
+    base('support-resistance', 'Support / Resistance Zones', 'PRICE_ACTION', 'key-levels', 1.1, ['Sideways / Range', 'Reversal', 'Accumulation', 'Distribution']),
+    base('ict', 'ICT Premium / Discount & OTE', 'SMC_ICT', 'ict-smc', 1.25, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Accumulation', 'Distribution']),
+    base('smc', 'Smart Money Concepts Composite', 'SMC_ICT', 'ict-smc', 1.35, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Breakout', 'Reversal']),
+    base('liquidity-sweep', 'Liquidity Sweep (BSL / SSL)', 'SMC_ICT', 'liquidity', 1.3, ['Reversal', 'Accumulation', 'Distribution', 'High Volatility']),
+    base('bos-choch', 'BOS / CHoCH / MSS Structure', 'SMC_ICT', 'structure-break', 1.3, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Breakout', 'Reversal']),
+    base('fvg', 'Fair Value Gap (FVG Imbalance)', 'SMC_ICT', 'imbalance', 1.1, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Breakout']),
+    base('order-block', 'Institutional Order Block (OB)', 'SMC_ICT', 'order-flow', 1.2, ['Strong Bullish Trend', 'Strong Bearish Trend', 'Accumulation', 'Distribution']),
+    base('volume-analysis', 'Volume Surge & OBV Confirmation', 'VOLUME', 'volume', 1.05, ['Breakout', 'Strong Bullish Trend', 'Strong Bearish Trend', 'High Volatility']),
+  ];
+}
+
+export function createDefaultRiskSettings(): PersistentRiskSettings {
+  return {
+    dailyMaxLossUsd: 500,
+    maxOpenPositions: 20,
+    maxDrawdownPct: 5.0,
+    riskPerTradePct: 1.0,
+    maxPortfolioRiskPct: 5.0,
+    maxMarginUsagePct: 40.0,
+    maxCorrelatedExposure: 3,
+    maxSpreadPoints: 300,
+    maxVolatilityAtrPct: 3.5,
+    testAccountBalanceUsd: 10000,
+  };
+}
+
 function hydrateDb(parsed: Partial<LocalMemoryDatabase>): LocalMemoryDatabase {
   const now = new Date().toISOString();
   const baseControl = parsed.control ?? ({} as Partial<ControlStateRecord>);
+  const seededEnsemble = seedDefaultEnsembleStrategies();
+  const existingEnsembleMap = new Map(
+    (Array.isArray(parsed.ensembleStrategies) ? parsed.ensembleStrategies : []).map((s) => [s.id, s])
+  );
+  const mergedEnsemble = seededEnsemble.map((def) => {
+    const saved = existingEnsembleMap.get(def.id);
+    if (!saved) return def;
+    return {
+      ...def,
+      enabled: typeof saved.enabled === 'boolean' ? saved.enabled : def.enabled,
+      approved: typeof saved.approved === 'boolean' ? saved.approved : def.approved,
+      weight: typeof saved.weight === 'number' && saved.weight > 0 ? saved.weight : def.weight,
+      lastSignal: saved.lastSignal ?? def.lastSignal,
+      lastConfidence: typeof saved.lastConfidence === 'number' ? saved.lastConfidence : 0,
+      lastReasonUz: saved.lastReasonUz ?? def.lastReasonUz,
+      lastEvaluatedAt: saved.lastEvaluatedAt ?? null,
+      totalEvaluations: typeof saved.totalEvaluations === 'number' ? saved.totalEvaluations : 0,
+      signalsProduced: typeof saved.signalsProduced === 'number' ? saved.signalsProduced : 0,
+    };
+  });
+
   return {
-    schemaVersion: 2,
+    schemaVersion: 4,
     createdAt: parsed.createdAt ?? now,
     updatedAt: parsed.updatedAt ?? now,
+    mt5Config: {
+      bridgeUrl:
+        typeof parsed.mt5Config?.bridgeUrl === 'string' && parsed.mt5Config.bridgeUrl.trim()
+          ? parsed.mt5Config.bridgeUrl.trim().replace(/\/$/, '')
+          : (process.env.MT5_BRIDGE_URL || 'http://127.0.0.1:8000').replace(/\/$/, ''),
+      autoSync: parsed.mt5Config?.autoSync !== false,
+      pollingIntervalMs:
+        typeof parsed.mt5Config?.pollingIntervalMs === 'number' && parsed.mt5Config.pollingIntervalMs >= 1000
+          ? Math.min(30000, Math.round(parsed.mt5Config.pollingIntervalMs))
+          : 3000,
+      historyTargetYears:
+        typeof parsed.mt5Config?.historyTargetYears === 'number' && parsed.mt5Config.historyTargetYears >= 0.5
+          ? Math.min(5, parsed.mt5Config.historyTargetYears)
+          : 2.5,
+    },
+    mt5SymbolsCache: Array.isArray(parsed.mt5SymbolsCache) ? parsed.mt5SymbolsCache : [],
     control: {
       scannerStatus: baseControl.scannerStatus === 'PAUSED' ? 'PAUSED' : 'RUNNING',
       stopNewTrades: Boolean(baseControl.stopNewTrades),
@@ -424,6 +885,26 @@ function hydrateDb(parsed: Partial<LocalMemoryDatabase>): LocalMemoryDatabase {
       allowRealAccountTrading: Boolean(baseControl.allowRealAccountTrading),
     },
     strategies: Array.isArray(parsed.strategies) ? parsed.strategies : seedDefaultStrategies(),
+    ensembleStrategies: mergedEnsemble,
+    unifiedAnalyses:
+      parsed.unifiedAnalyses && typeof parsed.unifiedAnalyses === 'object'
+        ? parsed.unifiedAnalyses
+        : {},
+    scannerStates:
+      parsed.scannerStates && typeof parsed.scannerStates === 'object'
+        ? parsed.scannerStates
+        : {},
+    orders: Array.isArray(parsed.orders) ? parsed.orders : [],
+    riskSettings: {
+      ...createDefaultRiskSettings(),
+      ...(parsed.riskSettings ?? {}),
+    },
+    llmHealth: {
+      status: parsed.llmHealth?.status ?? 'UNCONFIGURED',
+      provider: parsed.llmHealth?.provider ?? null,
+      lastCheckedAt: parsed.llmHealth?.lastCheckedAt ?? null,
+      lastError: parsed.llmHealth?.lastError ?? null,
+    },
     notifications: Array.isArray(parsed.notifications) ? parsed.notifications : [],
     analyses: Array.isArray(parsed.analyses) ? parsed.analyses : [],
     signals: Array.isArray(parsed.signals) ? parsed.signals : [],
@@ -439,6 +920,21 @@ function hydrateDb(parsed: Partial<LocalMemoryDatabase>): LocalMemoryDatabase {
     executionLogs: Array.isArray(parsed.executionLogs) ? parsed.executionLogs : [],
     executedSignalHashes: Array.isArray(parsed.executedSignalHashes)
       ? parsed.executedSignalHashes
+      : [],
+    aiChats: {
+      chief_analyst: Array.isArray(parsed.aiChats?.chief_analyst) ? parsed.aiChats.chief_analyst : [],
+      market_intelligence: Array.isArray(parsed.aiChats?.market_intelligence) ? parsed.aiChats.market_intelligence : [],
+      strategy_analyst: Array.isArray(parsed.aiChats?.strategy_analyst) ? parsed.aiChats.strategy_analyst : [],
+      risk_intelligence: Array.isArray(parsed.aiChats?.risk_intelligence) ? parsed.aiChats.risk_intelligence : [],
+      trade_manager: Array.isArray(parsed.aiChats?.trade_manager) ? parsed.aiChats.trade_manager : [],
+      self_evaluation: Array.isArray(parsed.aiChats?.self_evaluation) ? parsed.aiChats.self_evaluation : [],
+    },
+    aiChatDedupIndex:
+      parsed.aiChatDedupIndex && typeof parsed.aiChatDedupIndex === 'object'
+        ? parsed.aiChatDedupIndex
+        : {},
+    strategySelfEvalMemory: Array.isArray(parsed.strategySelfEvalMemory)
+      ? parsed.strategySelfEvalMemory
       : [],
   };
 }
