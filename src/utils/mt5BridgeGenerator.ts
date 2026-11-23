@@ -1,13 +1,14 @@
 export function buildMt5BridgePython(): string {
   return `"""
-Trade Killer AI — MetaTrader 5 + Real Shamlar + 6-Strategiya AI Miyasi + Backtest + AI Proksi
+Trade Killer AI — MetaTrader 5 + Real Shamlar + 12-Strategiya AI Miyasi (Pine + GitHub) + Backtest + AI Proksi
 Oson ishga tushirish (VS Code terminalida):
   1) pip install MetaTrader5 fastapi uvicorn httpx pydantic
-  2) Shu papkaga .env faylini qo'ying (yoki PowerShell da kiriting):
+  2) (Ixtiyoriy) pip install pandas-ta-classic
+  3) Shu papkaga .env faylini qo'ying (yoki PowerShell da kiriting):
        LOCAL_LLM_BASE_URL=http://localhost:3001/v1
        LOCAL_LLM_API_KEY=SIZNING_PROKSI_KALITINGIZ
-  3) python mt5_bridge.py
-  4) Brauzerda oching: http://127.0.0.1:8000
+  4) python mt5_bridge.py
+  5) Brauzerda oching: http://127.0.0.1:8000
 """
 
 import json
@@ -24,6 +25,13 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
+
+try:
+    import pandas_ta_classic as pta_classic  # xgboosted/pandas-ta-classic (ixtiyoriy)
+    HAS_PANDAS_TA_CLASSIC = True
+except Exception:
+    pta_classic = None
+    HAS_PANDAS_TA_CLASSIC = False
 
 
 def load_local_env() -> bool:
@@ -54,7 +62,7 @@ def load_local_env() -> bool:
 
 ENV_LOADED = load_local_env()
 
-app = FastAPI(title="Trade Killer MT5 + 6-Strategy AI Bridge")
+app = FastAPI(title="Trade Killer MT5 + 12-Strategy AI Bridge")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -79,21 +87,25 @@ async def add_pna_headers(request: Request, call_next):
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-WATCH_SYMBOLS = ["XAUUSD", "EURUSD", "BTCUSD", "GBPUSD", "US100", "USDJPY"]
+WATCH_SYMBOLS = ["XAUUSD", "EURUSD", "BTCUSD", "GBPUSD", "US100", "USDJPY", "XAGUSD", "ETHUSD", "USOIL"]
 
 SYMBOL_ALIASES: Dict[str, List[str]] = {
     "XAUUSD": ["XAUUSD", "GOLD", "XAUUSDm", "XAUUSD.r", "XAUUSDc", "XAUUSDpro"],
+    "XAGUSD": ["XAGUSD", "SILVER", "XAGUSDm", "XAGUSD.r"],
     "EURUSD": ["EURUSD", "EURUSDm", "EURUSD.r", "EURUSDc", "EURUSDpro"],
     "GBPUSD": ["GBPUSD", "GBPUSDm", "GBPUSD.r", "GBPUSDc", "GBPUSDpro"],
     "USDJPY": ["USDJPY", "USDJPYm", "USDJPY.r", "USDJPYc", "USDJPYpro"],
     "BTCUSD": ["BTCUSD", "BTCUSDT", "BTCUSDm", "BITCOIN", "#Bitcoin"],
+    "ETHUSD": ["ETHUSD", "ETHUSDT", "ETHUSDm", "ETHEREUM"],
     "US100": ["US100", "USTEC", "NAS100", "NDX", "NQ100", "US100Cash", "USTECm"],
+    "USOIL": ["USOIL", "WTI", "XTIUSD", "USOILm", "CL"],
 }
 
 TF_MAP = {
     "M1": mt5.TIMEFRAME_M1,
     "M5": mt5.TIMEFRAME_M5,
     "M15": mt5.TIMEFRAME_M15,
+    "M30": mt5.TIMEFRAME_M30,
     "H1": mt5.TIMEFRAME_H1,
     "H4": mt5.TIMEFRAME_H4,
     "D1": mt5.TIMEFRAME_D1,
@@ -224,15 +236,109 @@ def _calc_rsi_rma(closes: List[float], period: int = 14) -> List[float]:
     return rsi
 
 
+def _calc_sma(values: List[float], period: int) -> List[float]:
+    out: List[float] = []
+    s = 0.0
+    for i, v in enumerate(values):
+        s += v
+        if i >= period:
+            s -= values[i - period]
+        out.append(s / min(i + 1, period))
+    return out
+
+
+def _calc_wma(values: List[float], period: int) -> List[float]:
+    p = max(1, int(period))
+    out: List[float] = []
+    for i in range(len(values)):
+        start = max(0, i - p + 1)
+        w_sum, val_sum = 0.0, 0.0
+        for j in range(start, i + 1):
+            w = float(j - start + 1)
+            w_sum += w
+            val_sum += values[j] * w
+        out.append(val_sum / w_sum if w_sum > 0 else values[i])
+    return out
+
+
+def _calc_linreg(values: List[float], period: int) -> List[float]:
+    p = max(2, period)
+    out: List[float] = []
+    for i in range(len(values)):
+        start = max(0, i - p + 1)
+        seg = values[start : i + 1]
+        k_len = len(seg)
+        if k_len < 2:
+            out.append(values[i])
+            continue
+        sx = k_len * (k_len - 1) / 2.0
+        sxx = (k_len - 1) * k_len * (2 * k_len - 1) / 6.0
+        sy = sum(seg)
+        sxy = sum(idx * y for idx, y in enumerate(seg))
+        denom = k_len * sxx - sx * sx
+        slope = (k_len * sxy - sx * sy) / denom if denom != 0 else 0.0
+        intercept = (sy - slope * sx) / k_len
+        out.append(intercept + slope * (k_len - 1))
+    return out
+
+
+def _calc_atr(highs: List[float], lows: List[float], closes: List[float], period: int = 10) -> List[float]:
+    n = len(closes)
+    if n == 0:
+        return []
+    trs = [highs[0] - lows[0]]
+    for i in range(1, n):
+        trs.append(max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1])))
+    atr = [trs[0]]
+    alpha = 1.0 / max(1, period)
+    prev = trs[0]
+    for i in range(1, n):
+        prev = alpha * trs[i] + (1.0 - alpha) * prev
+        atr.append(prev)
+    return atr
+
+
+def _calc_supertrend(highs: List[float], lows: List[float], closes: List[float], period: int = 10, mult: float = 3.0):
+    n = len(closes)
+    atr = _calc_atr(highs, lows, closes, period)
+    ub, lb = [0.0] * n, [0.0] * n
+    direction = [1] * n
+    val = [closes[0]] * n
+    for i in range(n):
+        hl2 = (highs[i] + lows[i]) / 2.0
+        bu = hl2 + mult * atr[i]
+        bl = hl2 - mult * atr[i]
+        if i == 0:
+            ub[i], lb[i], val[i] = bu, bl, bl
+            continue
+        ub[i] = bu if (bu < ub[i - 1] or closes[i - 1] > ub[i - 1]) else ub[i - 1]
+        lb[i] = bl if (bl > lb[i - 1] or closes[i - 1] < lb[i - 1]) else lb[i - 1]
+        prev_d = direction[i - 1]
+        if prev_d == -1 and closes[i] > ub[i]:
+            direction[i] = 1
+        elif prev_d == 1 and closes[i] < lb[i]:
+            direction[i] = -1
+        else:
+            direction[i] = prev_d
+        val[i] = lb[i] if direction[i] == 1 else ub[i]
+    return val, direction
+
+
 def compute_strategy_brain(candles: List[Dict[str, Any]], symbol: str, timeframe: str) -> Dict[str, Any]:
     """
-    6 ta AI strategiyasini haqiqiy MT5 shamlari ustida hisoblaydi:
+    12 ta AI strategiyasini (6 asosiy PineScript + 6 GitHub repository) haqiqiy MT5 shamlari ustida hisoblaydi:
       1) EMA 20 / 50 / 100 / 200 Ribbon
       2) Glaz RSI Chart Bars (14, 70/30)
       3) Libertus RSI Divergences v3.3 (90-bar BULL/BEAR)
       4) Smart Money Concepts [LuxAlgo] (BOS/CHoCH, OB, FVG, Premium/Discount)
       5) Scalping PullBack Tool R1.1 (PAC EMA 34 + EMA 89/200/600 + Heikin Ashi)
       6) VWAP Stdev Bands v2 Mod (+/-1.28, +/-2.01, +/-2.51 sigma)
+      7) Leviathan Price Action (santiquiroz/leviathan)
+      8) Geraked MT5 Pack (geraked/metatrader5: UT Bot + HA ZLSMA 14)
+      9) Alorse Suite (Alorse/pinescript-strategies: Double Supertrend + TTM Squeeze)
+     10) Pandas-TA Classic (xgboosted/pandas-ta-classic: ADX 14, MACD, Stoch)
+     11) Azadone Tools (azadone/trading-tools: Ichimoku Kumo + Liquidity Sweep)
+     12) PyneCore Strategies (theonetrade/pynecore-strategies: HMA 21 Trend Flow)
     """
     n = len(candles)
     if n < 20:
@@ -391,6 +497,101 @@ def compute_strategy_brain(candles: List[Dict[str, Any]], symbol: str, timeframe
     z_pct = ((closes[-1] - tr_bot) / max(1e-9, tr_top - tr_bot)) * 100.0
     smc_zone = "Premium" if z_pct > 52.5 else ("Discount" if z_pct < 47.5 else "Equilibrium")
 
+    # 7. Leviathan Price Action (santiquiroz/leviathan)
+    ema9 = _calc_ema(closes, 9)
+    ema21 = _calc_ema(closes, 21)
+    lev_trend = "BULLISH" if (ema9[-1] > ema21[-1] and closes[-1] > e200) else ("BEARISH" if (ema9[-1] < ema21[-1] and closes[-1] < e200) else "NEUTRAL")
+    lev_bos = "YO'Q"
+    lev_sig = "KUTISH"
+    if n >= 22:
+        sw_hi = max(highs[-21:-1])
+        sw_lo = min(lows[-21:-1])
+        lev_bos = "BULLISH BOS" if closes[-1] > sw_hi else ("BEARISH BOS" if closes[-1] < sw_lo else "YO'Q")
+        rng = max(1e-9, highs[-1] - lows[-1])
+        lw = min(opens[-1], closes[-1]) - lows[-1]
+        uw = highs[-1] - max(opens[-1], closes[-1])
+        bull_pat = (closes[-2] < opens[-2] and closes[-1] > opens[-1] and closes[-1] >= opens[-2] and opens[-1] <= closes[-2]) or (lw / rng >= 0.6 and uw / rng <= 0.25)
+        bear_pat = (closes[-2] > opens[-2] and closes[-1] < opens[-1] and opens[-1] >= closes[-2] and closes[-1] <= opens[-2]) or (uw / rng >= 0.6 and lw / rng <= 0.25)
+        if lev_trend == "BULLISH" and (lev_bos == "BULLISH BOS" or bull_pat):
+            lev_sig = "BUY"
+        elif lev_trend == "BEARISH" and (lev_bos == "BEARISH BOS" or bear_pat):
+            lev_sig = "SELL"
+
+    # 8. Geraked MT5 Pack (UT Bot + HA ZLSMA 14)
+    atr10 = _calc_atr(highs, lows, closes, 10)
+    ut_stop = [closes[0]] * n
+    ut_sig_latest = "KUTISH"
+    for i in range(1, n):
+        nloss = 2.0 * atr10[i]
+        ps = ut_stop[i - 1]
+        if closes[i] > ps and closes[i - 1] > ps:
+            ut_stop[i] = max(ps, closes[i] - nloss)
+        elif closes[i] < ps and closes[i - 1] < ps:
+            ut_stop[i] = min(ps, closes[i] + nloss)
+        else:
+            ut_stop[i] = closes[i] - nloss if closes[i] > ps else closes[i] + nloss
+        if i >= n - 5:
+            if closes[i - 1] <= ps and closes[i] > ut_stop[i]:
+                ut_sig_latest = "BUY"
+            elif closes[i - 1] >= ps and closes[i] < ut_stop[i]:
+                ut_sig_latest = "SELL"
+    lsma1 = _calc_linreg(ha_c, 14)
+    lsma2 = _calc_linreg(lsma1, 14)
+    zlsma14_last = 2.0 * lsma1[-1] - lsma2[-1]
+
+    # 9. Alorse Suite (Double Supertrend 3.0 & 5.0 + TTM Squeeze)
+    st1_val, st1_dir = _calc_supertrend(highs, lows, closes, 10, 3.0)
+    _, st2_dir = _calc_supertrend(highs, lows, closes, 10, 5.0)
+    double_st = "DOUBLE_BULL" if (st1_dir[-1] == 1 and st2_dir[-1] == 1) else ("DOUBLE_BEAR" if (st1_dir[-1] == -1 and st2_dir[-1] == -1) else "ARALASH")
+    sma20 = _calc_sma(closes, 20)
+    atr20 = _calc_atr(highs, lows, closes, 20)
+    seg20 = closes[max(0, n - 20):]
+    stdev20 = math.sqrt(sum((x - sma20[-1]) ** 2 for x in seg20) / max(1, len(seg20)))
+    ttm_squeeze_on = (sma20[-1] - 2.0 * stdev20 > ema20[-1] - 1.5 * atr20[-1]) and (sma20[-1] + 2.0 * stdev20 < ema20[-1] + 1.5 * atr20[-1])
+
+    # 10. Pandas-TA Classic (ADX 14 + MACD 12/26/9)
+    sm_tr, sm_p, sm_m, dx_sm = max(1e-9, highs[0] - lows[0]), 0.0, 0.0, 20.0
+    p_di, m_di = 20.0, 20.0
+    for i in range(1, n):
+        up_m = highs[i] - highs[i - 1]
+        dn_m = lows[i - 1] - lows[i]
+        pdm = up_m if (up_m > dn_m and up_m > 0) else 0.0
+        mdm = dn_m if (dn_m > up_m and dn_m > 0) else 0.0
+        tr_i = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        sm_tr = sm_tr - sm_tr / 14.0 + tr_i
+        sm_p = sm_p - sm_p / 14.0 + pdm
+        sm_m = sm_m - sm_m / 14.0 + mdm
+        p_di = (100.0 * sm_p / sm_tr) if sm_tr > 0 else 0.0
+        m_di = (100.0 * sm_m / sm_tr) if sm_tr > 0 else 0.0
+        dx = (100.0 * abs(p_di - m_di) / (p_di + m_di)) if (p_di + m_di) > 0 else 0.0
+        dx_sm = (dx_sm * 13.0 + dx) / 14.0
+    e12, e26 = _calc_ema(closes, 12), _calc_ema(closes, 26)
+    macd_line = [e12[i] - e26[i] for i in range(n)]
+    macd_sig = _calc_ema(macd_line, 9)
+    macd_hist_last = macd_line[-1] - macd_sig[-1]
+
+    # 11. Azadone Tools (Ichimoku Cloud + Liquidity Sweep)
+    tenkan = (max(highs[max(0, n - 9):]) + min(lows[max(0, n - 9):])) / 2.0
+    kijun = (max(highs[max(0, n - 26):]) + min(lows[max(0, n - 26):])) / 2.0
+    span_a = (tenkan + kijun) / 2.0
+    span_b = (max(highs[max(0, n - 52):]) + min(lows[max(0, n - 52):])) / 2.0
+    kumo_bias = "BULL_KUMO" if closes[-1] > max(span_a, span_b) else ("BEAR_KUMO" if closes[-1] < min(span_a, span_b) else "KUMO_ICHIDA")
+    sweep_sig = "YO'Q"
+    if n >= 18:
+        for i in range(max(16, n - 4), n):
+            p_hi = max(highs[i - 15 : i])
+            p_lo = min(lows[i - 15 : i])
+            if lows[i] < p_lo and closes[i] > p_lo and ha_c[i] > ha_o[i]:
+                sweep_sig = "BUY_SWEEP"
+            elif highs[i] > p_hi and closes[i] < p_hi and ha_c[i] < ha_o[i]:
+                sweep_sig = "SELL_SWEEP"
+
+    # 12. PyneCore HMA(21) Trend Flow
+    w_half = _calc_wma(closes, 10)
+    w_full = _calc_wma(closes, 21)
+    hma21 = _calc_wma([2.0 * w_half[i] - w_full[i] for i in range(n)], 5)
+    hma_slope = "UP" if (len(hma21) > 1 and hma21[-1] >= hma21[-2]) else "DOWN"
+
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -424,6 +625,12 @@ def compute_strategy_brain(candles: List[Dict[str, Any]], symbol: str, timeframe
             "upper201": round(vwap_val + 2.01 * dev_val, 5),
             "lower201": round(vwap_val - 2.01 * dev_val, 5),
         },
+        "leviathan": {"trend": lev_trend, "bos": lev_bos, "signal": lev_sig},
+        "gerakedMt5": {"utBotSignal": ut_sig_latest, "utStop": round(ut_stop[-1], 5), "zlsma14": round(zlsma14_last, 5)},
+        "alorseSuite": {"doubleSupertrend": double_st, "supertrendLevel": round(st1_val[-1], 5), "ttmSqueezeOn": ttm_squeeze_on},
+        "pandasTaClassic": {"adx14": round(dx_sm, 2), "plusDi": round(p_di, 2), "minusDi": round(m_di, 2), "macdHist": round(macd_hist_last, 5)},
+        "azadoneTools": {"tenkan": round(tenkan, 5), "kijun": round(kijun, 5), "kumoBias": kumo_bias, "sweepSignal": sweep_sig},
+        "pynecoreSuite": {"hma21": round(hma21[-1], 5), "hmaSlope": hma_slope},
     }
 
 
@@ -500,6 +707,9 @@ def snapshot_mt5_state() -> Dict[str, Any]:
                 "rsi14": rsi_val,
                 "trend": trend_label,
                 "contractSize": float(info.trade_contract_size) or 100.0,
+                "tickSize": float(getattr(info, "trade_tick_size", 0.0) or getattr(info, "point", 0.0001) or 0.0001),
+                "point": float(getattr(info, "point", 0.0001) or 0.0001),
+                "tradeMode": int(getattr(info, "trade_mode", 4) or 4),
             })
 
     raw_positions = mt5.positions_get() or []
@@ -750,6 +960,8 @@ def health():
         "proxyUrl": cfg["base_url"],
         "model": cfg["model"],
         "hasApiKey": bool(cfg["api_key"]),
+        "hasPandasTaClassic": HAS_PANDAS_TA_CLASSIC,
+        "strategyEngines": 12,
     }
 
 
@@ -826,6 +1038,22 @@ def get_strategy_brain(
     return compute_strategy_brain(candles, resolved, timeframe)
 
 
+@app.get("/api/mtf")
+def get_multi_timeframe_candles(
+    symbol: str = Query("XAUUSD"),
+    count: int = Query(120),
+):
+    resolved = resolve_mt5_symbol(symbol)
+    tfs = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1"]
+    candles_by_tf: Dict[str, List[Dict[str, Any]]] = {}
+    for tf in tfs:
+        try:
+            candles_by_tf[tf] = read_mt5_candles(resolved, tf, min(max(count, 60), 220))
+        except Exception:
+            pass
+    return {"symbol": resolved, "candlesByTf": candles_by_tf}
+
+
 @app.post("/api/orders")
 def place_order(body: OrderPayload):
     return execute_mt5_order(body.symbol, body.side, body.lotSize, body.stopLoss, body.takeProfit)
@@ -861,10 +1089,13 @@ async def ai_chat(body: ChatPayload):
         "role": "system",
         "content": (
             "Siz Trade Killer AI — MetaTrader 5 (MT5) terminali uchun to'liq huquqli skalping va uzoq muddatli savdo AI sisiz. "
-            "Sizning miyangiz 6 ta strategiyaga asoslangan: (1) EMA 20/50/100/200 Ribbon, (2) Glaz RSI Bars (>70/<30), "
+            "Sizning miyangiz 12 ta strategiyaga asoslangan: (1) EMA 20/50/100/200 Ribbon, (2) Glaz RSI Bars (>70/<30), "
             "(3) Libertus RSI Divergences v3.3 (BULL/BEAR), (4) LuxAlgo SMC (BOS/CHoCH, OB, FVG, Premium/Discount), "
-            "(5) Scalping PullBack Tool R1.1 (PAC34 + EMA 89/200), (6) VWAP Stdev Bands (+/-2.01 sigma). "
-            "Faqat o'zbek tilida javob bering. Joriy MT5 holati va 6-strategiya hisob-kitoblari:\\n"
+            "(5) Scalping PullBack Tool R1.1 (PAC34 + EMA 89/200), (6) VWAP Stdev Bands (+/-2.01 sigma), "
+            "(7) Leviathan PA (EMA 9/21/200 + Swing BOS + Pinbar/Engulfing), (8) Geraked MT5 (UT Bot ATR + HA ZLSMA 14), "
+            "(9) Alorse Double Supertrend (3.0/5.0) + TTM Squeeze, (10) Pandas-TA ADX(14)/MACD, "
+            "(11) Azadone Ichimoku Kumo + Liquidity Sweep, (12) PyneCore HMA(21) Trend Flow. "
+            "Faqat o'zbek tilida javob bering. Joriy MT5 holati va 12-strategiya hisob-kitoblari:\\n"
             + json.dumps({"state": state, "strategy_brains": strategy_brains}, ensure_ascii=False)
         ),
     }
@@ -943,7 +1174,7 @@ async def ai_summary(body: SummaryPayload):
             pass
 
     prompt = (
-        "MT5 real holati va 6-strategiya ko'rsatkichlari asosida o'zbek tilida sof JSON formatida xulosa bering. "
+        "MT5 real holati va 12-strategiya (Pine + GitHub) ko'rsatkichlari asosida o'zbek tilida sof JSON formatida xulosa bering. "
         "Maydonlar: marketBias, confidencePct (son), headline, riskNote, recommendations: [{symbol, action, style, entry, stopLoss, takeProfit, rationale}].\\n"
         + json.dumps({"state": state, "brains": brains, "clientContext": body.context or {}}, ensure_ascii=False)
     )

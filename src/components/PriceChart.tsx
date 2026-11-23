@@ -9,7 +9,7 @@ import {
 } from '../types/trading';
 import { formatPrice } from '../data/initialData';
 import { generateMt5Candles } from '../utils/backtestEngine';
-import { analyzeStrategyBrain } from '../utils/strategyBrain';
+import { analyzeStrategyBrain, StrategyBrainAnalysis } from '../utils/strategyBrain';
 
 interface PriceChartProps {
   pairs: MarketPair[];
@@ -18,10 +18,20 @@ interface PriceChartProps {
   serverConfig: ServerConfig;
   tradingStyle: TradingStyle;
   onChangeStyle: (style: TradingStyle) => void;
+  timeframe?: Timeframe;
+  onTimeframeChange?: (tf: Timeframe) => void;
   onBrainUpdate?: (snapshot: StrategyBrainSnapshot) => void;
+  onFullBrainUpdate?: (analysis: StrategyBrainAnalysis) => void;
+  onCandlesUpdate?: (candles: CandlePoint[]) => void;
+  tradeLevels?: {
+    entry: number;
+    stopLoss: number;
+    takeProfit: number;
+    action: string;
+  } | null;
 }
 
-const TIMEFRAMES: Timeframe[] = ['M1', 'M5', 'M15', 'H1', 'H4', 'D1', 'W1'];
+const TIMEFRAMES: Timeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'];
 
 export const PriceChart: React.FC<PriceChartProps> = ({
   pairs,
@@ -30,11 +40,22 @@ export const PriceChart: React.FC<PriceChartProps> = ({
   serverConfig,
   tradingStyle,
   onChangeStyle,
+  timeframe: controlledTimeframe,
+  onTimeframeChange,
   onBrainUpdate,
+  onFullBrainUpdate,
+  onCandlesUpdate,
+  tradeLevels,
 }) => {
-  const [timeframe, setTimeframe] = useState<Timeframe>(
+  const [internalTimeframe, setInternalTimeframe] = useState<Timeframe>(
     tradingStyle === 'SCALPING' ? 'M5' : 'H4'
   );
+  const timeframe = controlledTimeframe ?? internalTimeframe;
+  const setTimeframe = (tf: Timeframe) => {
+    setInternalTimeframe(tf);
+    if (onTimeframeChange) onTimeframeChange(tf);
+  };
+
   const [chartType, setChartType] = useState<'candles' | 'area'>('candles');
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [mt5LiveCandles, setMt5LiveCandles] = useState<CandlePoint[] | null>(null);
@@ -47,10 +68,18 @@ export const PriceChart: React.FC<PriceChartProps> = ({
   const [showVwap, setShowVwap] = useState(false);
   const [showSmc, setShowSmc] = useState(true);
   const [showRsiBars, setShowRsiBars] = useState(true);
+  const [showSupertrend, setShowSupertrend] = useState(false);
+  const [showUtZlsma, setShowUtZlsma] = useState(false);
+  const [showIchimoku, setShowIchimoku] = useState(false);
+  const [showCandlePatterns, setShowCandlePatterns] = useState(true);
+  const [showChartPatterns, setShowChartPatterns] = useState(true);
+  const [showTradeLevels, setShowTradeLevels] = useState(true);
 
   useEffect(() => {
-    setTimeframe(tradingStyle === 'SCALPING' ? 'M5' : 'H4');
-  }, [tradingStyle]);
+    if (!controlledTimeframe) {
+      setInternalTimeframe(tradingStyle === 'SCALPING' ? 'M5' : 'H4');
+    }
+  }, [tradingStyle, controlledTimeframe]);
 
   const activePair = useMemo(
     () => pairs.find((p) => p.symbol === selectedSymbol) ?? pairs[0],
@@ -121,10 +150,19 @@ export const PriceChart: React.FC<PriceChartProps> = ({
   );
 
   useEffect(() => {
+    if (onCandlesUpdate) {
+      onCandlesUpdate(fullCandles);
+    }
+  }, [fullCandles, onCandlesUpdate]);
+
+  useEffect(() => {
     if (onBrainUpdate) {
       onBrainUpdate(brain.snapshot);
     }
-  }, [brain.snapshot, onBrainUpdate]);
+    if (onFullBrainUpdate) {
+      onFullBrainUpdate(brain);
+    }
+  }, [brain, onBrainUpdate, onFullBrainUpdate]);
 
   const viewCount = 48;
   const startOffset = Math.max(0, fullCandles.length - viewCount);
@@ -156,11 +194,23 @@ export const PriceChart: React.FC<PriceChartProps> = ({
         min = Math.min(min, brain.series.vwapLower201[gi]);
         max = Math.max(max, brain.series.vwapUpper201[gi]);
       }
+      if (showSupertrend) {
+        min = Math.min(min, brain.series.supertrend1[gi]);
+        max = Math.max(max, brain.series.supertrend1[gi]);
+      }
+      if (showUtZlsma) {
+        min = Math.min(min, brain.series.utStop[gi], brain.series.zlsma14[gi]);
+        max = Math.max(max, brain.series.utStop[gi], brain.series.zlsma14[gi]);
+      }
+      if (showIchimoku) {
+        min = Math.min(min, brain.series.ichimokuSpanA[gi], brain.series.ichimokuSpanB[gi]);
+        max = Math.max(max, brain.series.ichimokuSpanA[gi], brain.series.ichimokuSpanB[gi]);
+      }
       if (c.volume > mVol) mVol = c.volume;
     }
     const padding = (max - min) * 0.1 || activePair.price * 0.005;
     return { minPrice: min - padding, maxPrice: max + padding, maxVol: mVol };
-  }, [candles, startOffset, brain.series, showEmaRibbon, showVwap, activePair.price]);
+  }, [candles, startOffset, brain.series, showEmaRibbon, showVwap, showSupertrend, showUtZlsma, showIchimoku, activePair.price]);
 
   const priceToY = (price: number) => {
     const ratio = (price - minPrice) / (maxPrice - minPrice || 1);
@@ -245,7 +295,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
               onClick={() => onChangeStyle('SCALPING')}
               className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                 tradingStyle === 'SCALPING'
-                  ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                  ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-violet-300'
                   : 'text-slate-500 dark:text-slate-400'
               }`}
             >
@@ -256,7 +306,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
               onClick={() => onChangeStyle('LONG_TERM')}
               className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                 tradingStyle === 'LONG_TERM'
-                  ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                  ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-violet-300'
                   : 'text-slate-500 dark:text-slate-400'
               }`}
             >
@@ -266,7 +316,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-0.5 p-1 rounded-lg bg-slate-100 dark:bg-[#0D1320] border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-0.5 p-1 rounded-lg bg-slate-100 dark:bg-[#070C18] border border-slate-200 dark:border-violet-500/20">
             {TIMEFRAMES.map((tf) => (
               <button
                 key={tf}
@@ -274,7 +324,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
                 onClick={() => setTimeframe(tf)}
                 className={`px-2 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   timeframe === tf
-                    ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                    ? 'bg-white dark:bg-sky-500/20 text-slate-900 dark:text-sky-300'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
@@ -283,13 +333,13 @@ export const PriceChart: React.FC<PriceChartProps> = ({
             ))}
           </div>
 
-          <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#0D1320] border border-slate-200 dark:border-slate-800">
+          <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#070C18] border border-slate-200 dark:border-violet-500/20">
             <button
               type="button"
               onClick={() => setChartType('candles')}
               className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 chartType === 'candles'
-                  ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                  ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-violet-300'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
               }`}
             >
@@ -300,7 +350,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
               onClick={() => setChartType('area')}
               className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 chartType === 'area'
-                  ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                  ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-violet-300'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
               }`}
             >
@@ -311,36 +361,42 @@ export const PriceChart: React.FC<PriceChartProps> = ({
       </div>
 
       {/* Indicator Overlay Toggles + OHLC Row */}
-      <div className="flex flex-wrap items-center justify-between gap-2 py-2.5 text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-slate-800/70">
+      <div className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400 border-b border-slate-100 dark:border-violet-500/15">
         <div className="flex flex-wrap items-center gap-3">
           <span>Vaqt: {hoveredCandle.time}</span>
           <span>O: {formatPrice(hoveredCandle.open)}</span>
           <span>H: {formatPrice(hoveredCandle.high)}</span>
           <span>L: {formatPrice(hoveredCandle.low)}</span>
-          <span className="text-[#C8285E] dark:text-[#FF7AA5] font-medium">
+          <span className="text-sky-600 dark:text-sky-400 font-medium">
             C: {formatPrice(hoveredCandle.close)}
           </span>
-          <span className={candleSource === 'MT5 Real Shamlar' ? 'text-emerald-400' : 'text-slate-400'}>
+          <span className={candleSource === 'MT5 Real Shamlar' ? 'text-[#00E5A0]' : 'text-slate-400'}>
             · {candleSource}
           </span>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 font-sans">
+        <div className="flex flex-wrap items-center gap-1 font-sans">
           {[
+            { label: 'Entry/SL/TP', active: showTradeLevels, toggle: () => setShowTradeLevels((v) => !v) },
             { label: 'EMA 20/50/100/200', active: showEmaRibbon, toggle: () => setShowEmaRibbon((v) => !v) },
             { label: 'PAC 34', active: showPac, toggle: () => setShowPac((v) => !v) },
             { label: 'VWAP ±2σ', active: showVwap, toggle: () => setShowVwap((v) => !v) },
             { label: 'SMC OB/BOS', active: showSmc, toggle: () => setShowSmc((v) => !v) },
             { label: 'RSI Bars/Div', active: showRsiBars, toggle: () => setShowRsiBars((v) => !v) },
+            { label: 'Supertrend', active: showSupertrend, toggle: () => setShowSupertrend((v) => !v) },
+            { label: 'UT + ZLSMA', active: showUtZlsma, toggle: () => setShowUtZlsma((v) => !v) },
+            { label: 'Ichimoku', active: showIchimoku, toggle: () => setShowIchimoku((v) => !v) },
+            { label: 'Shamlar', active: showCandlePatterns, toggle: () => setShowCandlePatterns((v) => !v) },
+            { label: 'Pattern', active: showChartPatterns, toggle: () => setShowChartPatterns((v) => !v) },
           ].map((btn) => (
             <button
               key={btn.label}
               type="button"
               onClick={btn.toggle}
-              className={`px-2 py-0.5 text-[11px] font-medium rounded border transition-colors cursor-pointer whitespace-nowrap ${
+              className={`px-2 py-0.5 text-[10.5px] font-medium rounded border transition-colors cursor-pointer whitespace-nowrap ${
                 btn.active
-                  ? 'border-[#F25F8C]/50 bg-[#F25F8C]/15 text-[#C8285E] dark:text-[#FF7AA5]'
-                  : 'border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400'
+                  ? 'border-sky-400/50 bg-sky-500/15 text-sky-700 dark:text-sky-300'
+                  : 'border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:border-violet-500/40'
               }`}
             >
               {btn.label}
@@ -349,12 +405,12 @@ export const PriceChart: React.FC<PriceChartProps> = ({
         </div>
       </div>
 
-      {/* Live 6-Strategy Brain Unboxed Strip */}
+      {/* Live 12-Strategy Brain Unboxed Strip */}
       <div className="flex flex-wrap items-center justify-between gap-2 py-2 text-[11px] font-mono tabular-nums text-slate-600 dark:text-slate-300">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
           <span>
             EMA Fan:{' '}
-            <strong className="text-[#C8285E] dark:text-[#FF7AA5]">{snap.emaRibbon.alignment}</strong>
+            <strong className="text-violet-600 dark:text-violet-400">{snap.emaRibbon.alignment}</strong>
           </span>
           <span aria-hidden="true" className="text-slate-400">·</span>
           <span>
@@ -374,7 +430,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
           </span>
           <span aria-hidden="true" className="text-slate-400">·</span>
           <span>
-            SMC: <strong className="text-[#C8285E] dark:text-[#FF7AA5]">{snap.smc.lastStructureTag}</strong> ({snap.smc.zone})
+            SMC: <strong className="text-sky-600 dark:text-sky-400">{snap.smc.lastStructureTag}</strong> ({snap.smc.zone})
           </span>
           <span aria-hidden="true" className="text-slate-400">·</span>
           <span>
@@ -392,7 +448,66 @@ export const PriceChart: React.FC<PriceChartProps> = ({
             </strong>
           </span>
           <span aria-hidden="true" className="text-slate-400">·</span>
-          <span>VWAP: {snap.vwapBands.zone}</span>
+          <span>
+            UT:{' '}
+            <strong
+              className={
+                snap.gerakedMt5.utBotSignal === 'BUY'
+                  ? 'text-emerald-400'
+                  : snap.gerakedMt5.utBotSignal === 'SELL'
+                    ? 'text-rose-400'
+                    : 'text-slate-400'
+              }
+            >
+              {snap.gerakedMt5.utBotSignal}
+            </strong>
+          </span>
+          <span aria-hidden="true" className="text-slate-400">·</span>
+          <span>
+            ST:{' '}
+            <strong
+              className={
+                snap.alorseSuite.doubleSupertrend === 'DOUBLE_BULL'
+                  ? 'text-emerald-400'
+                  : snap.alorseSuite.doubleSupertrend === 'DOUBLE_BEAR'
+                    ? 'text-rose-400'
+                    : 'text-amber-400'
+              }
+            >
+              {snap.alorseSuite.doubleSupertrend === 'DOUBLE_BULL'
+                ? 'BULL'
+                : snap.alorseSuite.doubleSupertrend === 'DOUBLE_BEAR'
+                  ? 'BEAR'
+                  : 'MIX'}
+            </strong>
+          </span>
+          <span aria-hidden="true" className="text-slate-400">·</span>
+          <span>ADX:{snap.pandasTaClassic.adx14.toFixed(0)}</span>
+          <span aria-hidden="true" className="text-slate-400">·</span>
+          <span>
+            Kumo:{' '}
+            <strong className="text-slate-900 dark:text-white">
+              {snap.azadoneTools.kumoBias === 'BULL_KUMO'
+                ? 'Bull'
+                : snap.azadoneTools.kumoBias === 'BEAR_KUMO'
+                  ? 'Bear'
+                  : 'Ichida'}
+            </strong>
+          </span>
+          <span aria-hidden="true" className="text-slate-400">·</span>
+          <span>Lev:{snap.leviathan.signal}</span>
+          {snap.azadoneTools.sweepSignal !== 'YO‘Q' && (
+            <>
+              <span aria-hidden="true" className="text-slate-400">·</span>
+              <span className="text-[#FF7AA5] font-semibold">{snap.azadoneTools.sweepSignal}</span>
+            </>
+          )}
+          {snap.alorseSuite.ttmSqueezeOn && (
+            <>
+              <span aria-hidden="true" className="text-slate-400">·</span>
+              <span className="text-amber-400">Squeeze ON</span>
+            </>
+          )}
         </div>
 
         <div className="font-semibold">
@@ -421,14 +536,14 @@ export const PriceChart: React.FC<PriceChartProps> = ({
         >
           <defs>
             <linearGradient id="tkNeonAreaGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#F25F8C" stopOpacity="0.28" />
-              <stop offset="55%" stopColor="#EB6B7B" stopOpacity="0.10" />
-              <stop offset="100%" stopColor="#E87769" stopOpacity="0" />
+              <stop offset="0%" stopColor="#A855F7" stopOpacity="0.30" />
+              <stop offset="55%" stopColor="#38BDF8" stopOpacity="0.12" />
+              <stop offset="100%" stopColor="#00E5A0" stopOpacity="0" />
             </linearGradient>
             <linearGradient id="tkNeonStrokeGrad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stopColor="#F25F8C" />
-              <stop offset="50%" stopColor="#EB6B7B" />
-              <stop offset="100%" stopColor="#E87769" />
+              <stop offset="0%" stopColor="#A855F7" />
+              <stop offset="55%" stopColor="#38BDF8" />
+              <stop offset="100%" stopColor="#00E5A0" />
             </linearGradient>
           </defs>
 
@@ -539,6 +654,73 @@ export const PriceChart: React.FC<PriceChartProps> = ({
             </g>
           )}
 
+          {/* Ichimoku Kumo Cloud (azadone/trading-tools) */}
+          {showIchimoku && candles.length > 1 && (
+            <g>
+              <path
+                d={
+                  candles
+                    .map((_, i) => {
+                      const x = padLeft + i * stepX + stepX / 2;
+                      const y = priceToY(brain.series.ichimokuSpanA[startOffset + i]);
+                      return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`;
+                    })
+                    .join(' ') +
+                  ' ' +
+                  candles
+                    .slice()
+                    .reverse()
+                    .map((_, ri) => {
+                      const i = candles.length - 1 - ri;
+                      const x = padLeft + i * stepX + stepX / 2;
+                      const y = priceToY(brain.series.ichimokuSpanB[startOffset + i]);
+                      return `L ${x.toFixed(1)} ${y.toFixed(1)}`;
+                    })
+                    .join(' ') +
+                  ' Z'
+                }
+                fill={snap.azadoneTools.kumoBias === 'BEAR_KUMO' ? '#F05A70' : '#22C58B'}
+                fillOpacity="0.12"
+              />
+              <path d={buildOverlayPath(brain.series.ichimokuSpanA)} fill="none" stroke="#22C58B" strokeWidth="0.9" opacity="0.55" />
+              <path d={buildOverlayPath(brain.series.ichimokuSpanB)} fill="none" stroke="#F05A70" strokeWidth="0.9" opacity="0.55" />
+              <path d={buildOverlayPath(brain.series.ichimokuTenkan)} fill="none" stroke="#38BDF8" strokeWidth="1.15" opacity="0.8" />
+              <path d={buildOverlayPath(brain.series.ichimokuKijun)} fill="none" stroke="#F59E0B" strokeWidth="1.15" opacity="0.8" />
+            </g>
+          )}
+
+          {/* Double Supertrend (Alorse/pinescript-strategies) */}
+          {showSupertrend &&
+            candles.slice(1).map((_, idx) => {
+              const i = idx + 1;
+              const gi = startOffset + i;
+              const x1 = padLeft + (i - 1) * stepX + stepX / 2;
+              const x2 = padLeft + i * stepX + stepX / 2;
+              const y1 = priceToY(brain.series.supertrend1[gi - 1]);
+              const y2 = priceToY(brain.series.supertrend1[gi]);
+              const bull = brain.series.supertrend1Dir[gi] === 1;
+              return (
+                <line
+                  key={`st-${i}`}
+                  x1={x1}
+                  y1={y1}
+                  x2={x2}
+                  y2={y2}
+                  stroke={bull ? '#10B981' : '#EF4444'}
+                  strokeWidth="1.6"
+                  opacity="0.9"
+                />
+              );
+            })}
+
+          {/* UT Bot ATR Stop + ZLSMA 14 (geraked/metatrader5) */}
+          {showUtZlsma && (
+            <g fill="none">
+              <path d={buildOverlayPath(brain.series.utStop)} stroke="#F25F8C" strokeWidth="1.35" strokeDasharray="4 2" opacity="0.9" />
+              <path d={buildOverlayPath(brain.series.zlsma14)} stroke="#22D3EE" strokeWidth="1.35" opacity="0.9" />
+            </g>
+          )}
+
           {candles.map((c, i) => {
             const x = padLeft + i * stepX + stepX * 0.25;
             const barW = Math.max(2, stepX * 0.5);
@@ -623,12 +805,161 @@ export const PriceChart: React.FC<PriceChartProps> = ({
                 );
               })}
 
+          {/* Chart Pattern Overlay (Active Breakout / Target / Pivot Polyline) */}
+          {showChartPatterns &&
+            snap.chartPatternReport?.activePattern &&
+            (() => {
+              const ap = snap.chartPatternReport.activePattern;
+              const visiblePts = ap.points
+                .filter((pt) => pt.index >= startOffset && pt.index < fullCandles.length)
+                .map((pt) => {
+                  const localI = pt.index - startOffset;
+                  const x = padLeft + localI * stepX + stepX / 2;
+                  const y = priceToY(pt.price);
+                  return `${x.toFixed(1)},${y.toFixed(1)}`;
+                });
+              const breakoutY = priceToY(ap.breakoutLevel);
+              const targetY = priceToY(ap.targetPrice);
+              return (
+                <g pointerEvents="none">
+                  {visiblePts.length >= 2 && (
+                    <polyline
+                      fill="none"
+                      stroke="#F25F8C"
+                      strokeWidth="1.5"
+                      strokeDasharray="3 2"
+                      opacity="0.9"
+                      points={visiblePts.join(' ')}
+                    />
+                  )}
+                  {breakoutY >= padTop && breakoutY <= padTop + plotH && (
+                    <line
+                      x1={padLeft}
+                      y1={breakoutY}
+                      x2={width - padRight}
+                      y2={breakoutY}
+                      stroke="#F59E0B"
+                      strokeWidth="0.9"
+                      strokeDasharray="4 3"
+                      opacity="0.7"
+                    />
+                  )}
+                  {targetY >= padTop && targetY <= padTop + plotH && (
+                    <line
+                      x1={padLeft}
+                      y1={targetY}
+                      x2={width - padRight}
+                      y2={targetY}
+                      stroke="#22C58B"
+                      strokeWidth="0.9"
+                      strokeDasharray="2 3"
+                      opacity="0.7"
+                    />
+                  )}
+                  <text
+                    x={padLeft + 6}
+                    y={padTop + 12}
+                    fontSize="9.5"
+                    fontWeight="700"
+                    fontFamily="JetBrains Mono, monospace"
+                    fill="#FF7AA5"
+                  >
+                    {ap.name} ({ap.status})
+                  </text>
+                </g>
+              );
+            })()}
+
+          {/* Candlestick Pattern Markers */}
+          {showCandlePatterns &&
+            snap.candlestickReport?.patterns
+              .filter((pat) => pat.index >= startOffset && pat.confirmationStatus !== 'RAD_ETILGAN')
+              .slice(-6)
+              .map((pat) => {
+                const localI = pat.index - startOffset;
+                const bar = candles[localI];
+                if (!bar) return null;
+                const x = padLeft + localI * stepX + stepX / 2;
+                const isBear = pat.bias === 'BEARISH';
+                const y = isBear ? Math.max(padTop + 12, priceToY(bar.high) - 10) : Math.min(padTop + plotH - 4, priceToY(bar.low) + 14);
+                const color =
+                  pat.confirmationStatus === 'KUTILMOQDA'
+                    ? '#F59E0B'
+                    : isBear
+                      ? '#FB7185'
+                      : '#34D399';
+                const shortName = pat.patternName.length > 14 ? `${pat.patternName.slice(0, 12)}..` : pat.patternName;
+                return (
+                  <text
+                    key={pat.id}
+                    x={x}
+                    y={y}
+                    textAnchor="middle"
+                    fontSize="8.5"
+                    fontWeight="700"
+                    fontFamily="JetBrains Mono, monospace"
+                    fill={color}
+                  >
+                    {shortName}
+                  </text>
+                );
+              })}
+
+          {/* AI Entry / Stop-Loss / Take-Profit Horizontal Lines */}
+          {showTradeLevels && tradeLevels && (
+            <g pointerEvents="none">
+              {[
+                { label: 'TP', price: tradeLevels.takeProfit, color: '#00E5A0', dash: '5 3' },
+                { label: 'ENTRY', price: tradeLevels.entry, color: '#38BDF8', dash: '3 2' },
+                { label: 'SL', price: tradeLevels.stopLoss, color: '#F43F5E', dash: '5 3' },
+              ].map((lvl) => {
+                const y = priceToY(lvl.price);
+                if (!Number.isFinite(y) || y < padTop || y > padTop + plotH) return null;
+                return (
+                  <g key={lvl.label}>
+                    <line
+                      x1={padLeft}
+                      y1={y}
+                      x2={width - padRight}
+                      y2={y}
+                      stroke={lvl.color}
+                      strokeWidth="1.15"
+                      strokeDasharray={lvl.dash}
+                      opacity="0.88"
+                    />
+                    <rect
+                      x={padLeft + 4}
+                      y={y - 8}
+                      width={lvl.label === 'ENTRY' ? 84 : 74}
+                      height={14}
+                      rx="2"
+                      fill="#070B16"
+                      fillOpacity="0.9"
+                      stroke={lvl.color}
+                      strokeWidth="0.6"
+                    />
+                    <text
+                      x={padLeft + 8}
+                      y={y + 2}
+                      fontSize="8.5"
+                      fontWeight="700"
+                      fontFamily="JetBrains Mono, monospace"
+                      fill={lvl.color}
+                    >
+                      {lvl.label} {formatPrice(lvl.price)}
+                    </text>
+                  </g>
+                );
+              })}
+            </g>
+          )}
+
           <line
             x1={padLeft}
             y1={priceToY(activePair.price)}
             x2={width - padRight}
             y2={priceToY(activePair.price)}
-            stroke="#F25F8C"
+            stroke="#38BDF8"
             strokeWidth="1"
             strokeDasharray="4 2"
           />
@@ -646,7 +977,7 @@ export const PriceChart: React.FC<PriceChartProps> = ({
             fontSize="10"
             fontWeight="700"
             fontFamily="JetBrains Mono, monospace"
-            fill="#0C111C"
+            fill="#050811"
           >
             {formatPrice(activePair.price)}
           </text>
@@ -676,8 +1007,8 @@ export const PriceChart: React.FC<PriceChartProps> = ({
                 y1={padTop}
                 x2={padLeft + hoverIndex * stepX + stepX / 2}
                 y2={padTop + plotH}
-                stroke="#F25F8C"
-                strokeOpacity="0.55"
+                stroke="#A855F7"
+                strokeOpacity="0.6"
                 strokeWidth="1"
                 strokeDasharray="3 3"
               />

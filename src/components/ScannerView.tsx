@@ -1,11 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import { AiScanSignal, MarketPair, StrategyBrainSnapshot } from '../types/trading';
 import { formatPrice } from '../data/initialData';
-import { ArrowUpRight, Play, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { ArrowUpRight, Pause, Play, RefreshCw, Search, Sparkles } from 'lucide-react';
+import { apiFetch } from '../utils/apiClient';
 
 interface ScannerViewProps {
   pairs: MarketPair[];
   allPairBrains?: StrategyBrainSnapshot[];
+  scannerStatus?: 'RUNNING' | 'PAUSED';
+  lastAnalysisTime?: string | null;
+  onToggleScanner?: (pause: boolean) => void;
   onTradePair: (symbol: string) => void;
   onExecuteSignal: (signal: AiScanSignal) => void;
 }
@@ -13,6 +17,9 @@ interface ScannerViewProps {
 export const ScannerView: React.FC<ScannerViewProps> = ({
   pairs,
   allPairBrains = [],
+  scannerStatus = 'RUNNING',
+  lastAnalysisTime = null,
+  onToggleScanner,
   onTradePair,
   onExecuteSignal,
 }) => {
@@ -48,9 +55,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
         ...p,
         strategyBrain: brainBySymbol.get(p.symbol) ?? null,
       }));
-      const res = await fetch('/api/ai/scan', {
+      const res = await apiFetch('/api/ai/scan', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           pairs: enrichedPairs,
           styleFilter: scanStyle === 'ALL' ? 'Skalping va Uzoq muddatli' : scanStyle,
@@ -76,15 +82,45 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             <div className="flex items-center gap-2">
               <Sparkles className="w-4 h-4 text-[#C8285E] dark:text-[#FF7AA5]" />
               <h2 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                AI To‘liq Bozor Skaneri (6-Strategiya Konfluensiyasi)
+                AI To‘liq Bozor Skaneri (12-Strategiya Konfluensiyasi)
               </h2>
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-              AI barcha MT5 instrumentlarini EMA 20/50/100/200, RSI Div, SMC LuxAlgo, PAC34 va VWAP bo‘yicha skaner qiladi.
+              Holat:{' '}
+              <span
+                className={
+                  scannerStatus === 'RUNNING'
+                    ? 'font-mono font-semibold text-emerald-500'
+                    : 'font-mono font-semibold text-amber-500'
+                }
+              >
+                {scannerStatus === 'RUNNING' ? '24/7 Faol' : 'Pauzada'}
+              </span>
+              {lastAnalysisTime && (
+                <span className="font-mono tabular-nums">
+                  {' '}
+                  · Oxirgi tahlil: {new Date(lastAnalysisTime).toLocaleTimeString('en-GB')}
+                </span>
+              )}
+              {' '}· SMC, PAC34, Leviathan BOS, Geraked UT/ZLSMA, Double Supertrend, ADX va Ichimoku Sweep.
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {onToggleScanner && (
+              <button
+                type="button"
+                onClick={() => onToggleScanner(scannerStatus === 'RUNNING')}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  scannerStatus === 'RUNNING'
+                    ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300 hover:bg-amber-500/20'
+                    : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 hover:bg-emerald-500/20'
+                }`}
+              >
+                {scannerStatus === 'RUNNING' ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
+                <span>{scannerStatus === 'RUNNING' ? 'Pauza' : 'Davom ettirish'}</span>
+              </button>
+            )}
             <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#0D1320] border border-slate-200 dark:border-slate-800">
               {(['ALL', 'Skalping', 'Uzoq muddatli'] as const).map((s) => (
                 <button
@@ -105,8 +141,8 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
             <button
               type="button"
               onClick={handleRunAiScan}
-              disabled={scanning}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-[#F25F8C] via-[#EB6B7B] to-[#E87769] text-slate-950 hover:brightness-110 neon-glow-cyan cursor-pointer whitespace-nowrap"
+              disabled={scanning || scannerStatus === 'PAUSED'}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-gradient-to-r from-[#F25F8C] via-[#EB6B7B] to-[#E87769] text-slate-950 hover:brightness-110 disabled:opacity-50 neon-glow-cyan cursor-pointer whitespace-nowrap"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${scanning ? 'animate-spin' : ''}`} />
               <span>{scanning ? 'Skanerlanmoqda...' : 'To‘liq AI Skaner boshlash'}</span>
@@ -138,7 +174,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                       </span>
                     </div>
                     <span
-                      className={`text-xs font-semibold font-mono ${
+                      className={`text-xs font-semibold font-mono tabular-nums ${
                         sig.signal === 'BUY'
                           ? 'text-emerald-600 dark:text-emerald-400'
                           : sig.signal === 'SELL'
@@ -146,7 +182,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                             : 'text-amber-600 dark:text-amber-400'
                       }`}
                     >
-                      {sig.signal} ({sig.confidencePct}%)
+                      {sig.signal} · Ball {sig.confidencePct}/100
                     </span>
                   </div>
 
@@ -236,7 +272,7 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                   <th className="py-3 px-4 text-right">Spred</th>
                   <th className="py-3 px-4 text-right">RSI (14)</th>
                   <th className="py-3 px-4">Trend</th>
-                  <th className="py-3 px-4">AI Miya (SMC · PAC · Div)</th>
+                  <th className="py-3 px-4">AI Miya (12 Strategiya)</th>
                   <th className="py-3 px-5 text-right">Terminal</th>
                 </tr>
               </thead>
@@ -288,9 +324,27 @@ export const ScannerView: React.FC<ScannerViewProps> = ({
                         </span>
                       </td>
                       <td className="py-3.5 px-4 text-xs font-mono tabular-nums text-slate-600 dark:text-slate-300">
-                        {brain
-                          ? `${brain.smc.swingBias} · PAC:${brain.scalpingPullback.signal} · Div:${brain.rsiDivergence.latestType}`
-                          : 'Hisoblanmoqda'}
+                        {brain ? (
+                          <div className="space-y-0.5">
+                            <div>
+                              {brain.regime ? `${brain.regime.regime} · ` : ''}
+                              {brain.smc.swingBias} · UT:{brain.gerakedMt5.utBotSignal} · ST:
+                              {brain.alorseSuite.doubleSupertrend === 'DOUBLE_BULL'
+                                ? 'BULL'
+                                : brain.alorseSuite.doubleSupertrend === 'DOUBLE_BEAR'
+                                  ? 'BEAR'
+                                  : 'MIX'}{' '}
+                              · ADX:{brain.pandasTaClassic.adx14.toFixed(0)}
+                            </div>
+                            {brain.candlestickReport?.latestConfirmedPattern && (
+                              <div className="text-[11px] font-sans text-[#C8285E] dark:text-[#FF7AA5]">
+                                Sham: {brain.candlestickReport.latestConfirmedPattern.patternName}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          'Hisoblanmoqda'
+                        )}
                       </td>
                       <td className="py-3.5 px-5 text-right">
                         <button

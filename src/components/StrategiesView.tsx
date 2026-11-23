@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { RiskGuardSettings, StrategyConfig } from '../types/trading';
-import { formatCurrency } from '../data/initialData';
+import { IntelligentDecisionReport, RiskGuardSettings, StrategyConfig } from '../types/trading';
+import { formatCurrency, formatPrice } from '../data/initialData';
 
 interface StrategiesViewProps {
   strategies: StrategyConfig[];
   riskGuard: RiskGuardSettings;
+  decisionReport?: IntelligentDecisionReport | null;
   onToggleStrategy: (id: string) => void;
   onUpdateStrategy: (updated: StrategyConfig) => void;
   onUpdateRiskGuard: (updated: RiskGuardSettings) => void;
@@ -13,6 +14,7 @@ interface StrategiesViewProps {
 export const StrategiesView: React.FC<StrategiesViewProps> = ({
   strategies,
   riskGuard,
+  decisionReport,
   onToggleStrategy,
   onUpdateStrategy,
   onUpdateRiskGuard,
@@ -59,7 +61,7 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
           )}
         </div>
 
-        <form onSubmit={handleRiskSave} className="mt-5 grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+        <form onSubmit={handleRiskSave} className="mt-5 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
           <div>
             <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1.5">
               Kunlik maksimal zarar (USD)
@@ -108,7 +110,57 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
             />
           </div>
 
-          <div className="flex items-center justify-between gap-3">
+          <div>
+            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1.5">
+              Standart savdo riski (%)
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min={0.1}
+              max={10}
+              value={riskGuard.defaultRiskPct ?? 1.0}
+              onChange={(e) =>
+                onUpdateRiskGuard({ ...riskGuard, defaultRiskPct: Number(e.target.value) || 1.0 })
+              }
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1.5">
+              Maks. Spred filtri (pt)
+            </label>
+            <input
+              type="number"
+              min={10}
+              max={5000}
+              value={riskGuard.maxSpreadPoints ?? 300}
+              onChange={(e) =>
+                onUpdateRiskGuard({ ...riskGuard, maxSpreadPoints: Number(e.target.value) || 300 })
+              }
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1.5">
+              Maks. ATR volatillik (%)
+            </label>
+            <input
+              type="number"
+              step="0.1"
+              min={0.2}
+              max={20}
+              value={riskGuard.maxVolatilityAtrPct ?? 2.5}
+              onChange={(e) =>
+                onUpdateRiskGuard({ ...riskGuard, maxVolatilityAtrPct: Number(e.target.value) || 2.5 })
+              }
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div className="sm:col-span-2 flex items-center justify-between gap-3">
             <label className="flex items-center gap-2.5 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
               <input
                 type="checkbox"
@@ -129,6 +181,90 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
           </div>
         </form>
       </section>
+
+      {decisionReport && (
+        <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131B2B] neon-surface overflow-hidden">
+          <div className="p-6 border-b border-slate-200 dark:border-slate-800 space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-white">
+                Bozor Rejimi va Strategiya Tanlash Miyasi ({decisionReport.symbol} · {decisionReport.timeframe})
+              </h2>
+              <span className="text-xs font-mono font-semibold text-[#C8285E] dark:text-[#FF7AA5]">
+                {decisionReport.regime.labelUz} ({decisionReport.regime.regime})
+              </span>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              {decisionReport.regime.rationaleUz}
+            </p>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+                  <th className="py-3 px-5">Strategiya</th>
+                  <th className="py-3 px-4">Rejim mosligi</th>
+                  <th className="py-3 px-4">Signal</th>
+                  <th className="py-3 px-4">Tasdiq / Qarshi signal</th>
+                  <th className="py-3 px-4">Kirish / Invalidatsiya</th>
+                  <th className="py-3 px-5 text-right">SL / TP (R:R)</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80">
+                {decisionReport.strategyDecisions.map((card) => (
+                  <tr
+                    key={card.strategyId}
+                    className={`hover:bg-slate-50 dark:hover:bg-slate-800/40 ${
+                      !card.selectedForRegime ? 'opacity-65' : ''
+                    }`}
+                  >
+                    <td className="py-3 px-5 font-medium text-slate-900 dark:text-white">
+                      <div>{card.strategyName}</div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">{card.reasonUz}</div>
+                    </td>
+                    <td className="py-3 px-4 font-mono">
+                      <span className={card.selectedForRegime ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-500'}>
+                        {card.selectedForRegime ? 'Tanlangan' : 'Chetlatilgan'}
+                      </span>
+                    </td>
+                    <td
+                      className={`py-3 px-4 font-mono font-semibold ${
+                        card.signal === 'BUY'
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : card.signal === 'SELL'
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-amber-600 dark:text-amber-400'
+                      }`}
+                    >
+                      {card.signal}
+                    </td>
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300 max-w-xs">
+                      {card.confirmingIndicators.length > 0 && (
+                        <div className="text-emerald-600 dark:text-emerald-400">
+                          + {card.confirmingIndicators.join(', ')}
+                        </div>
+                      )}
+                      {card.opposingSignals.length > 0 && (
+                        <div className="text-amber-600 dark:text-amber-400">
+                          - {card.opposingSignals.join(', ')}
+                        </div>
+                      )}
+                    </td>
+                    <td className="py-3 px-4 text-slate-600 dark:text-slate-300 max-w-xs">
+                      <div>{card.entryCondition}</div>
+                      <div className="text-[11px] text-slate-400">Inv: {card.invalidation}</div>
+                    </td>
+                    <td className="py-3 px-5 text-right font-mono tabular-nums text-slate-700 dark:text-slate-200">
+                      <div>{formatPrice(card.sl)} / {formatPrice(card.tp)}</div>
+                      <div className="text-[11px] text-[#C8285E] dark:text-[#FF7AA5]">1:{card.riskReward}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131B2B] neon-surface divide-y divide-slate-200 dark:divide-slate-800">
         <div className="p-6">
@@ -153,6 +289,16 @@ export const StrategiesView: React.FC<StrategiesViewProps> = ({
                     <span className="text-xs text-slate-500 dark:text-slate-400">
                       {strat.pairScope}
                     </span>
+                    {strat.sourceRepo && (
+                      <>
+                        <span aria-hidden="true" className="text-slate-400">
+                          ·
+                        </span>
+                        <span className="text-xs font-mono text-[#C8285E] dark:text-[#FF7AA5]">
+                          {strat.sourceRepo}
+                        </span>
+                      </>
+                    )}
                     <span aria-hidden="true" className="text-slate-400">
                       ·
                     </span>

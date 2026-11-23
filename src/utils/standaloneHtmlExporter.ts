@@ -16,7 +16,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Trade Killer AI · MT5 6-Strategiya Terminal</title>
+  <title>Trade Killer AI · MT5 12-Strategiya Terminal</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@600;700&display=swap" rel="stylesheet" />
@@ -125,9 +125,9 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       orderTp: '',
       riskPct: '1',
       backtestResult: null,
-      btStrategy: 'all_6_confluence',
+      btStrategy: 'all_12_mega_brain',
       aiSummary: null,
-      chat: [{ role: 'model', text: 'Assalomu alaykum! Men MT5 va 6-strategiya (EMA 20/50/100/200, Glaz RSI Bars, Libertus Divergensiya, LuxAlgo SMC, Scalping PullBack R1.1, VWAP Stdev) miyasiga ulangan Trade Killer AI man.' }]
+      chat: [{ role: 'model', text: 'Assalomu alaykum! Men MT5 va 12-strategiya (EMA 20/50/100/200, Glaz RSI, Libertus Divergensiya, LuxAlgo SMC, PAC34, VWAP hamda GitHub paketlari: Leviathan, Geraked UT/ZLSMA, Alorse Double Supertrend, Pandas-TA ADX, Azadone Ichimoku Sweep, PyneCore HMA21) miyasiga ulangan Trade Killer AI man.' }]
     };
 
     function fmtMoney(n) {
@@ -136,7 +136,8 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
     }
 
     function fmtPrice(n) {
-      return Number(n).toLocaleString('en-US', { minimumFractionDigits: n >= 100 ? 2 : 4, maximumFractionDigits: n >= 100 ? 2 : 4 });
+      var dec = n >= 100 ? 2 : (n >= 10 ? 3 : 4);
+      return Number(n).toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec });
     }
 
     function calcEma(arr, p) {
@@ -167,6 +168,46 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       return out;
     }
 
+    function calcAtr(candles, p = 10) {
+      const trs = candles.map((c, i) => i === 0 ? (c.high - c.low) : Math.max(c.high - c.low, Math.abs(c.high - candles[i - 1].close), Math.abs(c.low - candles[i - 1].close)));
+      const atr = [trs[0] || 0];
+      const a = 1 / Math.max(1, p);
+      for (let i = 1; i < trs.length; i++) atr.push(a * trs[i] + (1 - a) * atr[i - 1]);
+      return atr;
+    }
+
+    function calcSupertrend(candles, period = 10, mult = 3.0) {
+      const atr = calcAtr(candles, period);
+      const ub = [], lb = [], dir = [], val = [];
+      for (let i = 0; i < candles.length; i++) {
+        const hl2 = (candles[i].high + candles[i].low) / 2;
+        const bu = hl2 + mult * atr[i], bl = hl2 - mult * atr[i];
+        if (i === 0) { ub.push(bu); lb.push(bl); dir.push(1); val.push(bl); continue; }
+        ub.push(bu < ub[i - 1] || candles[i - 1].close > ub[i - 1] ? bu : ub[i - 1]);
+        lb.push(bl > lb[i - 1] || candles[i - 1].close < lb[i - 1] ? bl : lb[i - 1]);
+        const pd = dir[i - 1];
+        const d = (pd === -1 && candles[i].close > ub[i]) ? 1 : ((pd === 1 && candles[i].close < lb[i]) ? -1 : pd);
+        dir.push(d);
+        val.push(d === 1 ? lb[i] : ub[i]);
+      }
+      return { val, dir };
+    }
+
+    function calcUtBot(candles, p = 10, coef = 2.0) {
+      const atr = calcAtr(candles, p);
+      const stop = [candles[0] ? candles[0].close : 0];
+      const sig = ['KUTISH'];
+      for (let i = 1; i < candles.length; i++) {
+        const s = candles[i].close, ps = candles[i - 1].close, st = stop[i - 1], nl = coef * atr[i];
+        let nx = s > st ? s - nl : s + nl;
+        if (s > st && ps > st) nx = Math.max(st, s - nl);
+        else if (s < st && ps < st) nx = Math.min(st, s + nl);
+        stop.push(nx);
+        sig.push(ps <= st && s > nx ? 'BUY' : (ps >= st && s < nx ? 'SELL' : 'KUTISH'));
+      }
+      return { stop, sig };
+    }
+
     function computeBrainLocal(candles) {
       if (!candles || candles.length < 25) return null;
       const closes = candles.map(c => c.close);
@@ -178,6 +219,15 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       const align = e20[n] > e50[n] && e50[n] > e100[n] && e100[n] > e200[n] ? 'Buqa Fan' : (e20[n] < e50[n] && e50[n] < e100[n] && e100[n] < e200[n] ? 'Ayiq Fan' : 'Aralash');
       const pacC = calcEma(closes, 34);
       const f89 = calcEma(closes, 89);
+      const st1 = calcSupertrend(candles, 10, 3.0);
+      const st2 = calcSupertrend(candles, 10, 5.0);
+      const ut = calcUtBot(candles, 10, 2.0);
+      const doubleSt = st1.dir[n] === 1 && st2.dir[n] === 1 ? 'DOUBLE_BULL' : (st1.dir[n] === -1 && st2.dir[n] === -1 ? 'DOUBLE_BEAR' : 'ARALASH');
+      const tenkan = (Math.max(...highs.slice(-9)) + Math.min(...lows.slice(-9))) / 2;
+      const kijun = (Math.max(...highs.slice(-26)) + Math.min(...lows.slice(-26))) / 2;
+      const spanA = (tenkan + kijun) / 2;
+      const spanB = (Math.max(...highs.slice(-52)) + Math.min(...lows.slice(-52))) / 2;
+      const kumoBias = closes[n] > Math.max(spanA, spanB) ? 'BULL_KUMO' : (closes[n] < Math.min(spanA, spanB) ? 'BEAR_KUMO' : 'KUMO_ICHIDA');
       let vSum = 0, volSum = 0;
       for (const c of candles) { const hl2 = (c.high + c.low) / 2; const v = Math.max(1, c.volume || 1); vSum += hl2 * v; volSum += v; }
       const vwap = vSum / volSum;
@@ -189,8 +239,11 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
         pac34: pacC[n],
         ema89: f89[n],
         vwap,
+        doubleSt,
+        utSignal: ut.sig[n],
+        kumoBias,
         smcZone: zPct > 52.5 ? 'Premium' : (zPct < 47.5 ? 'Discount' : 'Equilibrium'),
-        series: { e20, e50, e200 }
+        series: { e20, e50, e200, st1: st1.val }
       };
     }
 
@@ -341,12 +394,17 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
         <div class="rounded-xl border neon-surface p-6 space-y-4">
           <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
             <div>
-              <h2 class="text-lg font-semibold">MT5 Tarixiy Backtest (6-Strategiya AI Miyasi)</h2>
+              <h2 class="text-lg font-semibold">MT5 Tarixiy Backtest (12-Strategiya AI Miyasi)</h2>
               <p class="text-xs text-slate-400">Real MT5 tarixiy shamlari asosida tanlangan strategiyani sinash</p>
             </div>
             <div class="flex flex-wrap gap-2">
               <select id="tk-bt-strat" class="px-3 py-2 text-xs rounded-lg bg-[#0D1320] border border-slate-700 text-[#FF7AA5]">
+                <option value="all_12_mega_brain" \${state.btStrategy === 'all_12_mega_brain' ? 'selected' : ''}>12-Strategiya Mega Miya (GitHub + Pine)</option>
                 <option value="all_6_confluence" \${state.btStrategy === 'all_6_confluence' ? 'selected' : ''}>6-Strategiya Konfluensiya</option>
+                <option value="leviathan_pa" \${state.btStrategy === 'leviathan_pa' ? 'selected' : ''}>Leviathan PA (EMA 9/21/200 + BOS)</option>
+                <option value="geraked_ut_zlsma" \${state.btStrategy === 'geraked_ut_zlsma' ? 'selected' : ''}>Geraked MT5 (UT Bot + ZLSMA)</option>
+                <option value="alorse_supertrend_squeeze" \${state.btStrategy === 'alorse_supertrend_squeeze' ? 'selected' : ''}>Alorse (Double Supertrend)</option>
+                <option value="ichimoku_sweep" \${state.btStrategy === 'ichimoku_sweep' ? 'selected' : ''}>Azadone (Ichimoku Kumo + Sweep)</option>
                 <option value="smc_luxalgo" \${state.btStrategy === 'smc_luxalgo' ? 'selected' : ''}>SMC LuxAlgo (BOS/CHoCH)</option>
                 <option value="scalp_pullback" \${state.btStrategy === 'scalp_pullback' ? 'selected' : ''}>Scalping PullBack R1.1 (PAC34)</option>
                 <option value="ema_ribbon_rsi" \${state.btStrategy === 'ema_ribbon_rsi' ? 'selected' : ''}>EMA 20/50/100/200 + RSI Div</option>
@@ -443,8 +501,12 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
       const pair = state.pairs.find(p => p.symbol === state.selectedSymbol) || state.pairs[0];
       const sb = state.brain && state.brain.serverBrain ? state.brain.serverBrain : null;
       const brainStrip = state.brain
-        ? 'EMA: ' + (sb ? sb.emaRibbon.alignment : state.brain.alignment) + ' · RSI: ' + Number(sb ? sb.rsi14 : state.brain.rsi14).toFixed(1) + ' · SMC: ' + (sb ? sb.smc.lastStructure + ' (' + sb.smc.zone + ')' : state.brain.smcZone) + ' · PAC34: ' + (sb ? sb.scalpingPullback.signal : 'Faol')
-        : '6-strategiya hisoblanmoqda...';
+        ? 'EMA: ' + (sb ? sb.emaRibbon.alignment : state.brain.alignment) +
+          ' · RSI: ' + Number(sb ? sb.rsi14 : state.brain.rsi14).toFixed(1) +
+          ' · UT: ' + (sb && sb.gerakedMt5 ? sb.gerakedMt5.utBotSignal : state.brain.utSignal) +
+          ' · ST: ' + (sb && sb.alorseSuite ? sb.alorseSuite.doubleSupertrend : state.brain.doubleSt) +
+          ' · Kumo: ' + (sb && sb.azadoneTools ? sb.azadoneTools.kumoBias : state.brain.kumoBias)
+        : '12-strategiya hisoblanmoqda...';
       const rk = computeOrderRisk(pair);
 
       return \`
@@ -464,7 +526,7 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
                 <span class="text-xs font-mono \${state.candleSource === 'MT5 Real Shamlar' ? 'text-emerald-400' : 'text-slate-400'}">Manba: \${state.candleSource}</span>
               </div>
               <div class="flex gap-1">
-                \${['M1','M5','M15','H1','H4','D1'].map(tf => '<button data-tf="' + tf + '" class="tk-tf-btn px-2.5 py-1 text-xs rounded ' + (state.timeframe === tf ? 'bg-[#F25F8C]/20 text-[#FF7AA5]' : 'text-slate-400') + '">' + tf + '</button>').join('')}
+                \${['M1','M5','M15','M30','H1','H4','D1'].map(tf => '<button data-tf="' + tf + '" class="tk-tf-btn px-2.5 py-1 text-xs rounded ' + (state.timeframe === tf ? 'bg-[#F25F8C]/20 text-[#FF7AA5]' : 'text-slate-400') + '">' + tf + '</button>').join('')}
               </div>
             </div>
             <div class="py-2 text-xs font-mono text-[#FF7AA5]">\${brainStrip}</div>
@@ -631,8 +693,10 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
             const data = await res.json();
             const bars = data.candles || [];
             const closes = bars.map(x => x.close);
-            const e20 = calcEma(closes, 20), e50 = calcEma(closes, 50), e200 = calcEma(closes, 200), pac = calcEma(closes, 34);
+            const e9 = calcEma(closes, 9), e20 = calcEma(closes, 20), e21 = calcEma(closes, 21), e50 = calcEma(closes, 50), e200 = calcEma(closes, 200), pac = calcEma(closes, 34);
             const rsi = calcRsi(closes, 14);
+            const st1 = calcSupertrend(bars, 10, 3.0), st2 = calcSupertrend(bars, 10, 5.0);
+            const ut = calcUtBot(bars, 10, 2.0);
             let wins = 0, losses = 0, pnl = 0;
             for (let i = 25; i < bars.length - 2; i++) {
               let dir = 0;
@@ -642,6 +706,30 @@ export function buildStandaloneIndexHtml(payload: ExportPayload): string {
               } else if (state.btStrategy === 'scalp_pullback') {
                 if (e20[i] > e200[i] && bars[i - 1].close < pac[i - 1] && bars[i].close > pac[i]) dir = 1;
                 else if (e20[i] < e200[i] && bars[i - 1].close > pac[i - 1] && bars[i].close < pac[i]) dir = -1;
+              } else if (state.btStrategy === 'geraked_ut_zlsma') {
+                if (ut.sig[i] === 'BUY') dir = 1;
+                else if (ut.sig[i] === 'SELL') dir = -1;
+              } else if (state.btStrategy === 'alorse_supertrend_squeeze') {
+                if (st1.dir[i] === 1 && st2.dir[i] === 1 && st1.dir[i - 1] === -1) dir = 1;
+                else if (st1.dir[i] === -1 && st2.dir[i] === -1 && st1.dir[i - 1] === 1) dir = -1;
+              } else if (state.btStrategy === 'leviathan_pa') {
+                const swHi = Math.max(...bars.slice(i - 20, i).map(x => x.high));
+                const swLo = Math.min(...bars.slice(i - 20, i).map(x => x.low));
+                if (e9[i] > e21[i] && closes[i] > e200[i] && closes[i] > swHi) dir = 1;
+                else if (e9[i] < e21[i] && closes[i] < e200[i] && closes[i] < swLo) dir = -1;
+              } else if (state.btStrategy === 'ichimoku_sweep') {
+                const pHi = Math.max(...bars.slice(i - 15, i).map(x => x.high));
+                const pLo = Math.min(...bars.slice(i - 15, i).map(x => x.low));
+                if (bars[i].low < pLo && closes[i] > pLo) dir = 1;
+                else if (bars[i].high > pHi && closes[i] < pHi) dir = -1;
+              } else if (state.btStrategy === 'all_12_mega_brain') {
+                let bPts = 0, sPts = 0;
+                if (e20[i] > e50[i]) bPts += 1; else sPts += 1;
+                if (closes[i] > pac[i]) bPts += 1; else sPts += 1;
+                if (st1.dir[i] === 1 && st2.dir[i] === 1) bPts += 2; else if (st1.dir[i] === -1 && st2.dir[i] === -1) sPts += 2;
+                if (ut.sig[i] === 'BUY') bPts += 2; else if (ut.sig[i] === 'SELL') sPts += 2;
+                if (e9[i] > e21[i] && closes[i] > e200[i]) bPts += 1; else if (e9[i] < e21[i] && closes[i] < e200[i]) sPts += 1;
+                if (bPts >= 5) dir = 1; else if (sPts >= 5) dir = -1;
               } else {
                 if (e20[i] > e50[i] && rsi[i] < 65 && bars[i].close > pac[i]) dir = 1;
                 else if (e20[i] < e50[i] && rsi[i] > 35 && bars[i].close < pac[i]) dir = -1;

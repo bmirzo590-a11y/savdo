@@ -11,6 +11,7 @@ import {
 import { formatCurrency, formatPrice } from '../data/initialData';
 import { generateMt5Candles, runBacktestEngine } from '../utils/backtestEngine';
 import { Play, Sparkles, RefreshCw } from 'lucide-react';
+import { apiFetch } from '../utils/apiClient';
 
 interface BacktestViewProps {
   pairs: MarketPair[];
@@ -29,7 +30,7 @@ interface AiBacktestReport {
   suggestedTpPct: number;
 }
 
-const TIMEFRAMES: Timeframe[] = ['M1', 'M5', 'M15', 'H1', 'H4', 'D1', 'W1'];
+const TIMEFRAMES: Timeframe[] = ['M1', 'M5', 'M15', 'M30', 'H1', 'H4', 'D1', 'W1'];
 
 export const BacktestView: React.FC<BacktestViewProps> = ({
   pairs,
@@ -42,11 +43,14 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
     style: initialParams?.style || 'SCALPING',
     timeframe: initialParams?.timeframe || 'M5',
     barsCount: initialParams?.barsCount || 300,
-    strategyId: initialParams?.strategyId || 'all_6_confluence',
+    strategyId: initialParams?.strategyId || 'all_12_mega_brain',
     lotSize: initialParams?.lotSize || 0.2,
     stopLossPct: initialParams?.stopLossPct || 0.6,
     takeProfitPct: initialParams?.takeProfitPct || 1.4,
     initialCapital: initialParams?.initialCapital || 10000,
+    spreadPoints: initialParams?.spreadPoints ?? 14,
+    commissionPerLotUsd: initialParams?.commissionPerLotUsd ?? 6.5,
+    slippagePoints: initialParams?.slippagePoints ?? 3,
   });
 
   const [result, setResult] = useState<BacktestResult | null>(null);
@@ -151,9 +155,8 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
         sampleTrades: result.trades.slice(0, 12),
       };
 
-      const res = await fetch('/api/ai/backtest-analyze', {
+      const res = await apiFetch('/api/ai/backtest-analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ result: payload }),
       });
       const data = await res.json();
@@ -220,7 +223,7 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
               MT5 Tarixiy Ma’lumotlar va Backtest Laboratoriyasi
             </h2>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              Kompyuterdagi MT5 tarixiy shamlari asosida 6 ta AI Miya strategiyasi (SMC LuxAlgo, PAC34 Pullback, EMA/RSI Div, VWAP) bo‘yicha backtest o‘tkazing.
+              Kompyuterdagi MT5 tarixiy shamlari asosida 12-strategiya AI miyasi (SMC LuxAlgo, PAC34, Leviathan, Geraked UT/ZLSMA, Alorse Double Supertrend, Ichimoku Sweep) bo‘yicha backtest o‘tkazing.
             </p>
           </div>
 
@@ -322,7 +325,12 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
               }
               className="w-full px-2.5 py-2 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
             >
-              <option value="all_6_confluence">6-Strategiya Konfluensiya</option>
+              <option value="all_12_mega_brain">12-Strategiya Mega Miya (GitHub + Pine)</option>
+              <option value="all_6_confluence">6-Strategiya Asosiy Konfluensiya</option>
+              <option value="leviathan_pa">Leviathan PA (EMA 9/21/200 + BOS)</option>
+              <option value="geraked_ut_zlsma">Geraked MT5 (UT Bot + ZLSMA 14)</option>
+              <option value="alorse_supertrend_squeeze">Alorse (Double Supertrend + TTM)</option>
+              <option value="ichimoku_sweep">Azadone (Ichimoku Kumo + Sweep)</option>
               <option value="smc_luxalgo">SMC LuxAlgo (BOS/CHoCH + OB)</option>
               <option value="scalp_pullback">Scalping PullBack R1.1 (PAC34)</option>
               <option value="ema_ribbon_rsi">EMA 20/50/100/200 + RSI Div</option>
@@ -368,6 +376,46 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
               min="0.1"
               value={params.takeProfitPct}
               onChange={(e) => setParams({ ...params, takeProfitPct: Number(e.target.value) || 1 })}
+              className="w-full px-2.5 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
+              Spred (pt)
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={params.spreadPoints ?? 14}
+              onChange={(e) => setParams({ ...params, spreadPoints: Number(e.target.value) || 0 })}
+              className="w-full px-2.5 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
+              Komissiya ($/lot)
+            </label>
+            <input
+              type="number"
+              step="0.5"
+              min="0"
+              value={params.commissionPerLotUsd ?? 6.5}
+              onChange={(e) => setParams({ ...params, commissionPerLotUsd: Number(e.target.value) || 0 })}
+              className="w-full px-2.5 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs text-slate-500 dark:text-slate-400 mb-1">
+              Slippage (pt)
+            </label>
+            <input
+              type="number"
+              min="0"
+              value={params.slippagePoints ?? 3}
+              onChange={(e) => setParams({ ...params, slippagePoints: Number(e.target.value) || 0 })}
               className="w-full px-2.5 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
             />
           </div>
@@ -434,6 +482,90 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
                 {result.params.symbol} · {result.params.timeframe} ({result.candles.length} sham)
               </div>
             </div>
+          </div>
+
+          {/* Backtest v2 Advanced Validation Strip + Style Breakdown */}
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-stretch">
+            <section className="xl:col-span-5 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131B2B] neon-surface p-5 space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-200 dark:border-slate-800">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
+                  Kengaytirilgan Validatsiya (Backtest v2)
+                </h3>
+                <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400">
+                  {result.noLookaheadVerified ? 'Look-Ahead Yo‘q · Next-Bar Open' : 'Tekshirilmoqda'}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs font-mono tabular-nums">
+                <div>
+                  <span className="font-sans text-slate-500 dark:text-slate-400 block">Expectancy</span>
+                  <span className="text-slate-900 dark:text-white font-semibold">
+                    {result.expectancyUsd >= 0 ? '+' : ''}{formatCurrency(result.expectancyUsd)}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-sans text-slate-500 dark:text-slate-400 block">O‘rtacha R:R</span>
+                  <span className="text-[#C8285E] dark:text-[#FF7AA5] font-semibold">
+                    1 : {result.avgRiskReward.toFixed(2)}
+                  </span>
+                </div>
+                <div>
+                  <span className="font-sans text-slate-500 dark:text-slate-400 block">Sharpe Ratio</span>
+                  <span className="text-slate-900 dark:text-white font-semibold">{result.sharpeRatio.toFixed(2)}</span>
+                </div>
+                <div>
+                  <span className="font-sans text-slate-500 dark:text-slate-400 block">In-Sample Win</span>
+                  <span className="text-slate-900 dark:text-white">{result.inSampleWinRatePct.toFixed(1)}%</span>
+                </div>
+                <div>
+                  <span className="font-sans text-slate-500 dark:text-slate-400 block">Out-of-Sample Win</span>
+                  <span className="text-emerald-600 dark:text-emerald-400">{result.outOfSampleWinRatePct.toFixed(1)}%</span>
+                </div>
+                <div>
+                  <span className="font-sans text-slate-500 dark:text-slate-400 block">Spred/Komissiya</span>
+                  <span className="text-amber-600 dark:text-amber-400">-{formatCurrency(result.totalCostsUsd)}</span>
+                </div>
+              </div>
+            </section>
+
+            <section className="xl:col-span-7 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-[#131B2B] neon-surface overflow-hidden">
+              <div className="p-4 border-b border-slate-200 dark:border-slate-800">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-white">
+                  Uslublar Bo‘yicha Taqsimot (Scalping · Intraday · Swing)
+                </h3>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400">
+                      <th className="py-2.5 px-4">Uslub</th>
+                      <th className="py-2.5 px-3">TF</th>
+                      <th className="py-2.5 px-3 text-right">Savdolar</th>
+                      <th className="py-2.5 px-3 text-right">Win Rate</th>
+                      <th className="py-2.5 px-3 text-right">PF</th>
+                      <th className="py-2.5 px-4 text-right">Sof PnL</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-200 dark:divide-slate-800/80 font-mono tabular-nums">
+                    {result.styleBreakdown.map((sb) => (
+                      <tr key={sb.label} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                        <td className="py-2.5 px-4 font-sans font-medium text-slate-900 dark:text-white">{sb.label}</td>
+                        <td className="py-2.5 px-3 text-slate-500 dark:text-slate-400">{sb.timeframe}</td>
+                        <td className="py-2.5 px-3 text-right">{sb.totalTrades}</td>
+                        <td className="py-2.5 px-3 text-right text-[#C8285E] dark:text-[#FF7AA5]">{sb.winRatePct.toFixed(1)}%</td>
+                        <td className="py-2.5 px-3 text-right">{sb.profitFactor.toFixed(2)}</td>
+                        <td
+                          className={`py-2.5 px-4 text-right font-semibold ${
+                            sb.netProfitUsd >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-rose-600 dark:text-rose-400'
+                          }`}
+                        >
+                          {sb.netProfitUsd >= 0 ? '+' : ''}{formatCurrency(sb.netProfitUsd)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
 
           {/* Equity Curve + AI Backtest Analysis */}
@@ -565,6 +697,7 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
                       <th className="py-2.5 px-4">Chiqish vaqti</th>
                       <th className="py-2.5 px-4 text-right">Kirish narxi</th>
                       <th className="py-2.5 px-4 text-right">Chiqish narxi</th>
+                      <th className="py-2.5 px-4 text-right">R / Xarajat</th>
                       <th className="py-2.5 px-4">Sabab</th>
                       <th className="py-2.5 px-5 text-right">Natija</th>
                     </tr>
@@ -586,6 +719,9 @@ export const BacktestView: React.FC<BacktestViewProps> = ({
                         <td className="py-2.5 px-4 text-slate-600 dark:text-slate-300">{t.exitTime}</td>
                         <td className="py-2.5 px-4 text-right">{formatPrice(t.entryPrice)}</td>
                         <td className="py-2.5 px-4 text-right">{formatPrice(t.exitPrice)}</td>
+                        <td className="py-2.5 px-4 text-right text-slate-500 dark:text-slate-400">
+                          {t.rMultiple >= 0 ? '+' : ''}{t.rMultiple.toFixed(2)}R / -${t.costsUsd.toFixed(1)}
+                        </td>
                         <td className="py-2.5 px-4 font-sans text-slate-500 dark:text-slate-400">
                           {t.exitReason}
                         </td>

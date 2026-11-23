@@ -4,6 +4,7 @@ import {
   AiChatMessage,
   AiRecommendation,
   AiSummaryReport,
+  IntelligentDecisionReport,
   MarketPair,
   Position,
   RiskGuardSettings,
@@ -13,6 +14,7 @@ import {
 } from '../types/trading';
 import { Bot, Send, ShieldCheck, Sparkles, RefreshCw, Play } from 'lucide-react';
 import { formatPrice } from '../data/initialData';
+import { apiFetch } from '../utils/apiClient';
 
 interface AiTradingPanelProps {
   pairs: MarketPair[];
@@ -22,6 +24,7 @@ interface AiTradingPanelProps {
   strategies: StrategyConfig[];
   riskGuard: RiskGuardSettings;
   brainSnapshot?: StrategyBrainSnapshot | null;
+  decisionReport?: IntelligentDecisionReport | null;
   allPairBrains?: StrategyBrainSnapshot[];
   accountMetrics: {
     balance: number;
@@ -40,9 +43,9 @@ interface AiTradingPanelProps {
 }
 
 const QUICK_PROMPTS = [
-  '6 ta strategiya bo‘yicha joriy juftlikni chuqur tahlil qil',
-  'XAUUSD M5 da Scalping PullBack R1.1 backtest o‘tkaz',
-  'SMC LuxAlgo va RSI Divergensiya signallarini skaner qil',
+  '12 ta strategiya (GitHub + Pine) bo‘yicha joriy juftlikni tahlil qil',
+  'XAUUSD M5 da all_12_mega_brain backtest o‘tkaz',
+  'Leviathan BOS, UT Bot va Double Supertrend signallarini skaner qil',
   'Konfluensiya mos kelsa 0.15 lot BUY yoki SELL och',
 ];
 
@@ -54,6 +57,7 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
   strategies,
   riskGuard,
   brainSnapshot,
+  decisionReport,
   allPairBrains,
   accountMetrics,
   fullPermissions,
@@ -66,7 +70,7 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
     {
       id: 'init-1',
       role: 'model',
-      text: 'Assalomu alaykum! Men Trade Killer AI — sizning 6 ta strategiyangiz (EMA 20/50/100/200, Glaz RSI Bars, Libertus RSI Divergensiya, LuxAlgo SMC, Scalping PullBack R1.1 va VWAP Stdev) asosida ishlaydigan MT5 avtonom tahlilchiman.',
+      text: 'Assalomu alaykum! Men Trade Killer AI — sizning 12 ta strategiyangiz (EMA 20/50/100/200, Glaz RSI, Libertus Divergensiya, LuxAlgo SMC, PAC34 Pullback, VWAP Stdev hamda GitHub paketlari: Leviathan PA, Geraked UT Bot/ZLSMA, Alorse Double Supertrend/TTM Squeeze, Pandas-TA ADX/MACD, Azadone Ichimoku/Sweep, PyneCore HMA Flow) asosida ishlaydigan MT5 avtonom tahlilchiman.',
       timestamp: new Date().toLocaleTimeString('en-GB'),
     },
   ]);
@@ -85,6 +89,13 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
     selectedSymbol,
     activeTradingStyle: tradingStyle === 'SCALPING' ? 'Skalping (M1-M15)' : 'Uzoq muddatli (H4-W1)',
     activeStrategyBrain: brainSnapshot ?? null,
+    decisionReport: decisionReport ?? null,
+    candlestickReport: brainSnapshot?.candlestickReport ?? null,
+    chartPatternReport: brainSnapshot?.chartPatternReport ?? null,
+    smcDeep: brainSnapshot?.smcDeep ?? null,
+    regime: decisionReport?.regime ?? brainSnapshot?.regime ?? null,
+    mtf: decisionReport?.mtf ?? null,
+    riskEvaluation: decisionReport?.riskEvaluation ?? null,
     allPairBrains: allPairBrains ?? [],
     pairs: pairs.map((p) => ({
       symbol: p.symbol,
@@ -133,9 +144,8 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
     setChatError(null);
 
     try {
-      const res = await fetch('/api/ai/chat', {
+      const res = await apiFetch('/api/ai/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           messages: nextHistory.map((m) => ({ role: m.role, text: m.text })),
           context: buildContextPayload(),
@@ -186,9 +196,8 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
     setLoadingSummary(true);
     setSummaryError(null);
     try {
-      const res = await fetch('/api/ai/summary', {
+      const res = await apiFetch('/api/ai/summary', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ context: buildContextPayload() }),
       });
       const data = await res.json();
@@ -376,9 +385,23 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
                 <div>RSI(14): {brainSnapshot.rsiBars.rsi14.toFixed(1)} · Div: {brainSnapshot.rsiDivergence.latestType}</div>
                 <div>SMC: {brainSnapshot.smc.lastStructureTag} ({brainSnapshot.smc.zone})</div>
                 <div>PAC34: {brainSnapshot.scalpingPullback.signal} · {brainSnapshot.scalpingPullback.barLocation}</div>
-                <div>VWAP: {formatPrice(brainSnapshot.vwapBands.vwap)}</div>
-                <div>±2.01σ: {formatPrice(brainSnapshot.vwapBands.lower201)} / {formatPrice(brainSnapshot.vwapBands.upper201)}</div>
+                <div>UT Bot: {brainSnapshot.gerakedMt5.utBotSignal} · ZLSMA: {formatPrice(brainSnapshot.gerakedMt5.zlsma14)}</div>
+                <div>Double ST: {brainSnapshot.alorseSuite.doubleSupertrend} · TTM: {brainSnapshot.alorseSuite.ttmSqueezeOn ? 'Squeeze' : (brainSnapshot.alorseSuite.ttmMomentum >= 0 ? '+Mom' : '-Mom')}</div>
+                <div>ADX(14): {brainSnapshot.pandasTaClassic.adx14.toFixed(1)} · {brainSnapshot.pandasTaClassic.candlePattern}</div>
+                <div>Ichimoku: {brainSnapshot.azadoneTools.kumoBias} · Sweep: {brainSnapshot.azadoneTools.sweepSignal}</div>
+                <div>Leviathan: {brainSnapshot.leviathan.signal} ({brainSnapshot.leviathan.bos})</div>
+                <div>PyneCore HMA21: {brainSnapshot.pynecoreSuite.flowSignal}</div>
               </div>
+              {decisionReport && (
+                <div className="pt-2 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 font-mono tabular-nums text-[11px]">
+                  <span className="text-slate-600 dark:text-slate-300">
+                    Rejim: {decisionReport.regime.labelUz} · MTF: {decisionReport.mtf.alignmentPct}%
+                  </span>
+                  <span className="font-semibold text-[#C8285E] dark:text-[#FF7AA5]">
+                    Hukm: {decisionReport.finalAction} · Tahliliy ball: {decisionReport.analyticalScore}/100
+                  </span>
+                </div>
+              )}
             </div>
           )}
 
@@ -388,7 +411,7 @@ export const AiTradingPanel: React.FC<AiTradingPanelProps> = ({
                 AI MT5 xulosasi hali yaratilmagan
               </p>
               <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm mx-auto">
-                6 ta strategiya ko‘rsatkichlari asosida tayyor kirish nuqtalarini olish uchun Xulosa yaratish tugmasini bosing.
+                12 ta strategiya va GitHub indikatorlari asosida tayyor kirish nuqtalarini olish uchun Xulosa yaratish tugmasini bosing.
               </p>
             </div>
           ) : (

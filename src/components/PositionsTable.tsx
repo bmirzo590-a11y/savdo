@@ -76,11 +76,11 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
   };
 
   return (
-    <section className="rounded-xl border border-slate-200 dark:border-slate-800/90 bg-white dark:bg-[#131B2B] neon-surface overflow-hidden">
-      <div className="p-5 flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800">
-        <div className="flex flex-wrap items-center gap-4">
-          <h2 className="text-base font-semibold text-slate-900 dark:text-white">{title}</h2>
-          <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#0D1320] border border-slate-200 dark:border-slate-800">
+    <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass overflow-hidden">
+      <div className="p-4 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 dark:border-violet-500/20">
+        <div className="flex flex-wrap items-center gap-3">
+          <h2 className="text-sm font-semibold text-slate-900 dark:text-white">{title}</h2>
+          <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#080D1B] border border-slate-200 dark:border-violet-500/20">
             {(
               [
                 ['ALL', 'Barchasi'],
@@ -93,9 +93,9 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                 key={val}
                 type="button"
                 onClick={() => setFilterStatus(val)}
-                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                   filterStatus === val
-                    ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5] shadow-xs'
+                    ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-sky-300 shadow-xs'
                     : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
                 }`}
               >
@@ -112,7 +112,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Ticket, juftlik yoki AI..."
-            className="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F25F8C]"
+            className="w-full pl-9 pr-3 py-1.5 text-sm rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white placeholder:text-slate-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
           />
         </div>
       </div>
@@ -155,7 +155,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                       <button
                         type="button"
                         onClick={() => onSelectPair && onSelectPair(pos.symbol)}
-                        className="font-semibold text-slate-900 dark:text-white hover:text-[#FF7AA5] transition-colors cursor-pointer text-left"
+                        className="font-semibold text-slate-900 dark:text-white hover:text-sky-400 transition-colors cursor-pointer text-left"
                       >
                         {pos.symbol}
                       </button>
@@ -175,7 +175,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                       </span>
                       <span className="text-xs text-slate-400 ml-1.5">· {pos.orderType}</span>
                     </td>
-                    <td className="py-3 px-4 text-right font-mono tabular-nums text-[#C8285E] dark:text-[#FF7AA5]">
+                    <td className="py-3 px-4 text-right font-mono tabular-nums text-violet-600 dark:text-sky-300">
                       {pos.lotSize.toFixed(2)} lot
                     </td>
                     <td className="py-3 px-4 text-right font-mono tabular-nums text-slate-700 dark:text-slate-300">
@@ -224,7 +224,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                           <button
                             type="button"
                             onClick={() => openEditModal(pos)}
-                            className="px-2.5 py-1 text-xs font-medium rounded border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:border-[#F25F8C]/55 transition-colors cursor-pointer"
+                            className="px-2.5 py-1 text-xs font-medium rounded border border-slate-200 dark:border-violet-500/30 text-slate-700 dark:text-slate-300 hover:border-sky-400 transition-colors cursor-pointer"
                           >
                             SL/TP
                           </button>
@@ -256,8 +256,8 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
           role="dialog"
           aria-modal="true"
         >
-          <div className="w-full max-w-md rounded-xl border border-slate-200 dark:border-[#F25F8C]/35 bg-white dark:bg-[#131B2B] p-6">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 dark:border-violet-500/40 bg-white dark:bg-[#0B1120] tk-glass-purple p-6">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-violet-500/20">
               <h3 className="text-base font-semibold text-slate-900 dark:text-white">
                 {editingPos.symbol} · SL / TP tahrirlash
               </h3>
@@ -280,7 +280,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                   step="any"
                   value={editSl}
                   onChange={(e) => setEditSl(e.target.value)}
-                  className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+                  className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white"
                 />
               </div>
               <div>
@@ -292,7 +292,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                   step="any"
                   value={editTp}
                   onChange={(e) => setEditTp(e.target.value)}
-                  className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white"
+                  className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white"
                 />
               </div>
               <div className="flex items-center justify-end gap-3 pt-2">
@@ -305,7 +305,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-gradient-to-r from-[#F25F8C] via-[#EB6B7B] to-[#E87769] text-slate-950 hover:brightness-110 neon-glow-cyan cursor-pointer"
+                  className="px-4 py-2 text-sm font-semibold rounded-lg bg-gradient-to-r from-violet-600 to-sky-500 text-white hover:brightness-110 neon-glow-purple cursor-pointer"
                 >
                   Saqlash
                 </button>

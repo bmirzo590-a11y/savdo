@@ -192,7 +192,7 @@ pause
                 </span>
               </div>
               <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                MT5 dan real shamlarni oladi, 6 ta strategiyani hisoblaydi, <code className="font-mono">.env</code> ni avtomatik o‘qiydi va <code className="font-mono">localhost:3001/v1</code> AI proksiga ulanadi.
+                MT5 dan real shamlarni oladi, 12 ta strategiyani (Pine + GitHub) hisoblaydi, <code className="font-mono">.env</code> ni avtomatik o‘qiydi va <code className="font-mono">localhost:3001/v1</code> AI proksiga ulanadi.
               </p>
             </div>
 
@@ -227,7 +227,7 @@ pause
                 </span>
               </div>
               <p className="mt-2 text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                Ko‘zga yoqimli dizayn, real MT5 shamlari, 6-strategiya AI suhbati, xulosalar, backtest va tezkor ulanish testi.
+                Ko‘zga yoqimli dizayn, real MT5 shamlari, 12-strategiya AI suhbati, xulosalar, backtest va tezkor ulanish testi.
               </p>
             </div>
 

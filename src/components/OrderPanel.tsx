@@ -1,12 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Calculator } from 'lucide-react';
-import { MarketPair, OrderSide, OrderType, Position } from '../types/trading';
+import { MarketPair, OrderSide, OrderType, Position, RiskEvaluationResult } from '../types/trading';
 import { formatPrice } from '../data/initialData';
 
 interface OrderPanelProps {
   pair: MarketPair;
   availableBalance: number;
   equity: number;
+  riskEvaluation?: RiskEvaluationResult | null;
+  tradingBlocked?: boolean;
   onPlaceOrder: (order: Omit<Position, 'id' | 'openedAt'>) => void;
 }
 
@@ -16,6 +18,8 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
   pair,
   availableBalance,
   equity,
+  riskEvaluation,
+  tradingBlocked = false,
   onPlaceOrder,
 }) => {
   const [side, setSide] = useState<OrderSide>('LONG');
@@ -140,8 +144,20 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
     }
   };
 
+  const handleApplyAiRiskTargets = () => {
+    if (!riskEvaluation) return;
+    const dec = pair.price >= 100 ? 2 : 4;
+    setStopLoss(riskEvaluation.dynamicStopLoss.toFixed(dec));
+    setTakeProfit(riskEvaluation.takeProfit.toFixed(dec));
+    setLotSize(riskEvaluation.recommendedLot.toFixed(2));
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (tradingBlocked) {
+      setFeedback('STOP NEW TRADES faol — yangi buyurtmalar vaqtincha bloklangan.');
+      return;
+    }
     if (parsedLot <= 0) {
       setFeedback('Lot hajmini 0.01 dan katta kiriting.');
       return;
@@ -171,19 +187,19 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
   };
 
   return (
-    <section className="rounded-xl border border-slate-200 dark:border-slate-800/90 bg-white dark:bg-[#131B2B] neon-surface p-5 flex flex-col justify-between h-full">
+    <section className="rounded-xl border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] tk-glass p-4 flex flex-col justify-between h-full">
       <div>
-        <div className="flex items-center justify-between pb-3 border-b border-slate-200 dark:border-slate-800">
-          <h2 className="text-base font-semibold text-slate-900 dark:text-white">
+        <div className="flex items-center justify-between pb-2.5 border-b border-slate-200 dark:border-violet-500/20">
+          <h2 className="text-sm font-semibold text-slate-900 dark:text-white">
             MT5 Tezkor Order
           </h2>
-          <span className="text-xs font-mono tabular-nums text-slate-500 dark:text-slate-400">
+          <span className="text-[11px] font-mono tabular-nums text-sky-600 dark:text-sky-400">
             Erkin: ${availableBalance.toLocaleString('en-US', { minimumFractionDigits: 2 })}
           </span>
         </div>
 
-        <form onSubmit={handleSubmit} className="mt-4 space-y-3.5">
-          <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#0D1320] border border-slate-200 dark:border-slate-800">
+        <form onSubmit={handleSubmit} className="mt-3 space-y-3">
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#080D1B] border border-slate-200 dark:border-violet-500/20">
             <button
               type="button"
               onClick={() => setSide('LONG')}
@@ -209,13 +225,13 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
           </div>
 
           <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#0D1320] border border-slate-200 dark:border-slate-800">
+            <div className="flex items-center gap-1 p-1 rounded-lg bg-slate-100 dark:bg-[#080D1B] border border-slate-200 dark:border-violet-500/20">
               <button
                 type="button"
                 onClick={() => setOrderType('MARKET')}
                 className={`px-3 py-1 text-xs font-medium rounded-md cursor-pointer transition-colors ${
                   orderType === 'MARKET'
-                    ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                    ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-sky-300'
                     : 'text-slate-500 dark:text-slate-400'
                 }`}
               >
@@ -226,7 +242,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                 onClick={() => setOrderType('LIMIT')}
                 className={`px-3 py-1 text-xs font-medium rounded-md cursor-pointer transition-colors ${
                   orderType === 'LIMIT'
-                    ? 'bg-white dark:bg-[#F25F8C]/15 text-slate-900 dark:text-[#FF7AA5]'
+                    ? 'bg-white dark:bg-violet-500/20 text-slate-900 dark:text-sky-300'
                     : 'text-slate-500 dark:text-slate-400'
                 }`}
               >
@@ -248,7 +264,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                 step="any"
                 value={limitPrice}
                 onChange={(e) => setLimitPrice(e.target.value)}
-                className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F25F8C]"
+                className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
               />
             </div>
           )}
@@ -268,7 +284,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
               step="0.01"
               value={lotSize}
               onChange={(e) => setLotSize(e.target.value)}
-              className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F25F8C]"
+              className="w-full px-3 py-2 text-sm font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
             />
             <div className="grid grid-cols-4 gap-1.5 mt-2">
               {['0.05', '0.10', '0.25', '0.50'].map((lot) => (
@@ -276,7 +292,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                   key={lot}
                   type="button"
                   onClick={() => setLotSize(lot)}
-                  className="py-1 text-xs font-mono tabular-nums rounded border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-[#F25F8C]/55 hover:text-[#C8285E] dark:hover:text-[#FF7AA5] transition-colors cursor-pointer"
+                  className="py-1 text-xs font-mono tabular-nums rounded border border-slate-200 dark:border-violet-500/20 text-slate-600 dark:text-slate-400 hover:border-sky-400/60 hover:text-sky-600 dark:hover:text-sky-300 transition-colors cursor-pointer"
                 >
                   {lot}
                 </button>
@@ -294,7 +310,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                 step="any"
                 value={stopLoss}
                 onChange={(e) => setStopLoss(e.target.value)}
-                className="w-full px-3 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F25F8C]"
+                className="w-full px-3 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
               />
             </div>
             <div>
@@ -306,15 +322,15 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                 step="any"
                 value={takeProfit}
                 onChange={(e) => setTakeProfit(e.target.value)}
-                className="w-full px-3 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-[#0D1320] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F25F8C]"
+                className="w-full px-3 py-2 text-xs font-mono tabular-nums rounded-lg border border-slate-200 dark:border-violet-500/25 bg-slate-50 dark:bg-[#080D1B] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
               />
             </div>
           </div>
 
           {/* Real-time Risk Calculator */}
-          <div className="rounded-lg border border-slate-200 dark:border-[#F25F8C]/25 bg-slate-50 dark:bg-[#0D1320] p-3 space-y-2.5">
+          <div className="rounded-lg border border-slate-200 dark:border-violet-500/30 bg-slate-50 dark:bg-[#080D1B] p-3 space-y-2.5">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-[#C8285E] dark:text-[#FF7AA5]">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-violet-600 dark:text-sky-300">
                 <Calculator className="w-3.5 h-3.5 shrink-0" />
                 <span>Risk kalkulyatori</span>
               </div>
@@ -333,7 +349,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                   value={riskPercent}
                   onChange={(e) => setRiskPercent(e.target.value)}
                   aria-label="Savdo riski foizi"
-                  className="w-full pl-2.5 pr-6 py-1.5 text-xs font-mono tabular-nums rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-[#131B2B] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F25F8C]"
+                  className="w-full pl-2.5 pr-6 py-1.5 text-xs font-mono tabular-nums rounded-md border border-slate-200 dark:border-violet-500/25 bg-white dark:bg-[#0B1120] text-slate-900 dark:text-white focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-500"
                 />
                 <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-mono text-slate-400">
                   %
@@ -349,8 +365,8 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                       onClick={() => setRiskPercent(preset)}
                       className={`py-1.5 text-[11px] font-mono tabular-nums rounded-md border transition-colors cursor-pointer ${
                         active
-                          ? 'border-[#F25F8C]/65 bg-[#F25F8C]/15 text-[#C8285E] dark:text-[#FF7AA5] font-semibold'
-                          : 'border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:border-[#F25F8C]/45'
+                          ? 'border-violet-500/65 bg-violet-500/15 text-violet-700 dark:text-sky-300 font-semibold'
+                          : 'border-slate-200 dark:border-violet-500/20 text-slate-600 dark:text-slate-400 hover:border-sky-400/50'
                       }`}
                     >
                       {preset}%
@@ -360,14 +376,14 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
               </div>
             </div>
 
-            <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 dark:border-slate-800/90 bg-white dark:bg-[#131B2B] px-2.5 py-2">
+            <div className="flex items-center justify-between gap-2 rounded-md border border-slate-200 dark:border-violet-500/20 bg-white dark:bg-[#0B1120] px-2.5 py-2">
               <div className="min-w-0">
                 <div className="text-[11px] text-slate-500 dark:text-slate-400">
                   Tavsiya etilgan optimal lot
                 </div>
                 {riskMetrics.suggestedLot !== null ? (
                   <div className="flex items-baseline gap-2 mt-0.5">
-                    <span className="text-sm font-bold font-mono tabular-nums text-[#C8285E] dark:text-[#FF7AA5]">
+                    <span className="text-sm font-bold font-mono tabular-nums text-violet-600 dark:text-sky-300">
                       {riskMetrics.suggestedLot.toFixed(2)} lot
                     </span>
                     <span className="text-[11px] font-mono tabular-nums text-slate-500 dark:text-slate-400">
@@ -388,7 +404,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
                 type="button"
                 disabled={riskMetrics.suggestedLot === null}
                 onClick={handleApplySuggestedLot}
-                className="shrink-0 px-2.5 py-1.5 text-xs font-semibold rounded-md bg-gradient-to-r from-[#F25F8C] via-[#EB6B7B] to-[#E87769] hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 neon-glow-cyan transition-all cursor-pointer"
+                className="shrink-0 px-2.5 py-1.5 text-xs font-semibold rounded-md bg-gradient-to-r from-violet-600 to-sky-500 hover:brightness-110 disabled:opacity-40 disabled:cursor-not-allowed text-white neon-glow-purple transition-all cursor-pointer"
               >
                 Qo‘llash
               </button>
@@ -427,17 +443,48 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-slate-500 dark:text-slate-400">Risk / Mukofot:</span>
-                <span className="font-mono tabular-nums text-[#C8285E] dark:text-[#FF7AA5]">
+                <span className="font-mono tabular-nums text-violet-600 dark:text-sky-300">
                   {riskMetrics.riskReward ? `1 : ${riskMetrics.riskReward.toFixed(2)}` : '—'}
                 </span>
               </div>
             </div>
+
+            {riskEvaluation && (
+              <div className="pt-2 border-t border-slate-200 dark:border-violet-500/20 space-y-1.5 text-[11px]">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-slate-700 dark:text-slate-200">
+                    AI Risk Manager (ATR SL / BE / Trailing)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleApplyAiRiskTargets}
+                    className="px-2 py-0.5 rounded border border-violet-500/45 text-violet-600 dark:text-sky-300 hover:bg-violet-500/15 cursor-pointer whitespace-nowrap"
+                  >
+                    AI SL/TP qo‘llash
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 font-mono tabular-nums text-slate-600 dark:text-slate-300">
+                  <div>ATR SL: {formatPrice(riskEvaluation.dynamicStopLoss)}</div>
+                  <div>BE (1R): {formatPrice(riskEvaluation.breakEvenPrice)}</div>
+                  <div>Trailing: {formatPrice(riskEvaluation.trailingStopDistance)}</div>
+                  <div>
+                    Filtr:{' '}
+                    <span className={riskEvaluation.overallAllowed ? 'text-emerald-500' : 'text-rose-500'}>
+                      {riskEvaluation.spreadOk && riskEvaluation.volatilityOk ? 'OK' : 'BLOK'}
+                    </span>
+                  </div>
+                </div>
+                <div className="font-mono tabular-nums text-[10.5px] text-slate-400">
+                  Spec: Tick {pair.tickSize ?? 0.01} · Point {pair.point ?? 0.01} · Spread {riskEvaluation.spreadOk ? 'OK' : 'Keng'}
+                </div>
+              </div>
+            )}
           </div>
 
           <div>
             <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400 mb-1">
               <span>MT5 Yelka (Leverage)</span>
-              <span className="font-mono tabular-nums text-[#C8285E] dark:text-[#FF7AA5] font-medium">
+              <span className="font-mono tabular-nums text-violet-600 dark:text-sky-300 font-medium">
                 1:{leverage}
               </span>
             </div>
@@ -448,7 +495,7 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
               step={10}
               value={leverage}
               onChange={(e) => setLeverage(Number(e.target.value))}
-              className="w-full accent-[#F25F8C] cursor-pointer"
+              className="w-full accent-violet-500 cursor-pointer"
             />
           </div>
 
@@ -473,15 +520,26 @@ export const OrderPanel: React.FC<OrderPanelProps> = ({
             </p>
           )}
 
+          {tradingBlocked && (
+            <p className="text-xs font-medium text-rose-500">
+              Favqulodda to‘xtatish (STOP NEW TRADES) faol — yangi savdolar bloklangan.
+            </p>
+          )}
+
           <button
             type="submit"
-            className={`w-full py-2.5 px-4 text-sm font-semibold rounded-lg transition-all cursor-pointer whitespace-nowrap ${
-              side === 'LONG'
-                ? 'bg-emerald-600 hover:bg-emerald-500 text-white dark:bg-emerald-500 dark:text-slate-950 neon-glow-emerald'
-                : 'bg-red-600 hover:bg-red-500 text-white dark:bg-rose-500 neon-glow-crimson'
+            disabled={tradingBlocked}
+            className={`w-full py-2.5 px-4 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+              tradingBlocked
+                ? 'bg-slate-700 text-slate-400 cursor-not-allowed opacity-70'
+                : side === 'LONG'
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white dark:bg-emerald-500 dark:text-slate-950 neon-glow-emerald cursor-pointer'
+                  : 'bg-red-600 hover:bg-red-500 text-white dark:bg-rose-500 neon-glow-crimson cursor-pointer'
             }`}
           >
-            {side === 'LONG' ? 'BUY' : 'SELL'} {parsedLot} lot · {pair.symbol}
+            {tradingBlocked
+              ? 'Yangi savdolar bloklangan'
+              : `${side === 'LONG' ? 'BUY' : 'SELL'} ${parsedLot} lot · ${pair.symbol}`}
           </button>
         </form>
       </div>
