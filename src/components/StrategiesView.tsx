@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { IntelligentDecisionReport, RiskGuardSettings, StrategyConfig } from '../types/trading';
-import { formatCurrency, formatPrice } from '../data/initialData';
+import { formatCurrency, formatPrice } from '../config/initialData';
 
 interface StrategiesViewProps {
   strategies: StrategyConfig[];

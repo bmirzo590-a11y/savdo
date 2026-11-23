@@ -16,7 +16,7 @@ import {
   TradingStyle,
   ViewId,
 } from '../types/trading';
-import { formatPrice } from '../data/initialData';
+import { formatPrice } from '../config/initialData';
 import { OrderPanel } from './OrderPanel';
 
 interface LiveSignalRailProps {

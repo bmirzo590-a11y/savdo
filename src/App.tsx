@@ -36,7 +36,7 @@ import {
   INITIAL_STRATEGIES,
   formatCurrency,
   formatPrice,
-} from './data/initialData';
+} from './config/initialData';
 import {
   AiRecommendation,
   AiScanSignal,

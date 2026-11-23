@@ -5,7 +5,7 @@ import {
   StrategyRegistryRecord,
   ViewId,
 } from '../types/trading';
-import { formatPrice } from '../data/initialData';
+import { formatPrice } from '../config/initialData';
 
 interface AiBrainStripProps {
   decisionReport: IntelligentDecisionReport;

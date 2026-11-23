@@ -10,7 +10,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { MarketPair, Position, PositionStatus } from '../types/trading';
-import { formatCurrency, formatPrice } from '../data/initialData';
+import { formatCurrency, formatPrice } from '../config/initialData';
 
 interface MultiOrderManagerViewProps {
   positions: Position[];

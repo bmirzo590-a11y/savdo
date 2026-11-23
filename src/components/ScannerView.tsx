@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { AiScanSignal, MarketPair, StrategyBrainSnapshot } from '../types/trading';
-import { formatPrice } from '../data/initialData';
+import { formatPrice } from '../config/initialData';
 import { ArrowUpRight, Pause, Play, RefreshCw, Search, Sparkles } from 'lucide-react';
 import { apiFetch } from '../utils/apiClient';
 

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { Position, PositionStatus } from '../types/trading';
-import { formatCurrency, formatPrice } from '../data/initialData';
+import { formatCurrency, formatPrice } from '../config/initialData';
 import { Search, X } from 'lucide-react';
 
 interface PositionsTableProps {

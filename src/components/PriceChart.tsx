@@ -7,7 +7,7 @@ import {
   Timeframe,
   TradingStyle,
 } from '../types/trading';
-import { formatPrice } from '../data/initialData';
+import { formatPrice } from '../config/initialData';
 import { generateMt5Candles } from '../utils/backtestEngine';
 import { analyzeStrategyBrain, StrategyBrainAnalysis } from '../utils/strategyBrain';
 

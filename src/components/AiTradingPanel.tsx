@@ -13,7 +13,7 @@ import {
   TradingStyle,
 } from '../types/trading';
 import { Bot, Send, ShieldCheck, Sparkles, RefreshCw, Play } from 'lucide-react';
-import { formatPrice } from '../data/initialData';
+import { formatPrice } from '../config/initialData';
 import { apiFetch } from '../utils/apiClient';
 
 interface AiTradingPanelProps {

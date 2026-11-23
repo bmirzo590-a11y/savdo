@@ -9,7 +9,7 @@ import {
   ShieldOff,
 } from 'lucide-react';
 import { LiveSystemStatusSnapshot } from '../types/trading';
-import { formatCurrency } from '../data/initialData';
+import { formatCurrency } from '../config/initialData';
 
 interface LiveSystemBarProps {
   status: LiveSystemStatusSnapshot | null;

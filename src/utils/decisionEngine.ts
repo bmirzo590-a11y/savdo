@@ -10,7 +10,7 @@ import {
   Timeframe,
   TimeframeBiasEntry,
 } from '../types/trading';
-import { INITIAL_STRATEGIES, generateCandlesForPair } from '../data/initialData';
+import { INITIAL_STRATEGIES, generateCandlesForPair } from '../config/initialData';
 import { analyzeStrategyBrain, StrategyBrainAnalysis } from './strategyBrain';
 import { evaluateTradeRisk } from './riskManager';
 

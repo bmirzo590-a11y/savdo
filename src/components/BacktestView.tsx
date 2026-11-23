@@ -8,7 +8,7 @@ import {
   Timeframe,
   TradingStyle,
 } from '../types/trading';
-import { formatCurrency, formatPrice } from '../data/initialData';
+import { formatCurrency, formatPrice } from '../config/initialData';
 import { generateMt5Candles, runBacktestEngine } from '../utils/backtestEngine';
 import { Play, Sparkles, RefreshCw } from 'lucide-react';
 import { apiFetch } from '../utils/apiClient';

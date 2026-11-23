@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Calculator } from 'lucide-react';
 import { MarketPair, OrderSide, OrderType, Position, RiskEvaluationResult } from '../types/trading';
-import { formatPrice } from '../data/initialData';
+import { formatPrice } from '../config/initialData';
 
 interface OrderPanelProps {
   pair: MarketPair;
